@@ -180,11 +180,17 @@ class GradNorm:
 
     @staticmethod
     def _get_shared_params(model: nn.Module) -> list[nn.Parameter]:
-        """Return the parameters of the last shared layer (fusion weights)."""
-        # Use the GAT input projections as the shared layer reference —
-        # specifically the first organ's input_proj to keep it simple.
-        first_organ = config.ORGAN_NAMES[0]
-        return list(model.organ_gats[first_organ].input_proj.parameters())
+        """Return params that receive gradients from all tasks.
+
+        The final Linear(32→1) of every OrganGAT MLP is the last computation
+        before local_scores, so both L_reg (via global_score) and L_rank (via
+        local_scores) produce non-zero gradients here — unlike input_proj which
+        only belongs to one organ and is only reached by L_reg.
+        """
+        params: list[nn.Parameter] = []
+        for organ in config.ORGAN_NAMES:
+            params.extend(model.organ_gats[organ].mlp[-1].parameters())
+        return params
 
     def update(
         self,

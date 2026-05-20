@@ -64,6 +64,7 @@ class FaceDataset(Dataset):
         csv_path: str,
         coords_cache: dict[str, np.ndarray],
         pseudo_labels: dict[str, dict[str, float]] | None = None,
+        avg_face: np.ndarray | None = None,
     ) -> None:
         df = pd.read_csv(csv_path)
 
@@ -86,14 +87,15 @@ class FaceDataset(Dataset):
         )
         self.coords_cache = coords_cache
         self.pseudo_labels = pseudo_labels or {}
+        self.avg_face = avg_face  # None → 3-dim features; provided → 6-dim
 
     def __len__(self) -> int:
         return len(self.filenames)
 
     def __getitem__(self, idx: int) -> dict:
         fname = self.filenames[idx]
-        coords = self.coords_cache[fname]           # (468, 3)
-        subgraphs = build_all_subgraphs(coords)     # dict[str, DGLGraph]
+        coords = self.coords_cache[fname]                            # (468, 3)
+        subgraphs = build_all_subgraphs(coords, self.avg_face)      # dict[str, DGLGraph]
 
         rating = torch.tensor(self.ratings[idx], dtype=torch.float32)
 

@@ -193,6 +193,7 @@ def normalize_coords(coords: np.ndarray) -> np.ndarray:
 def build_subgraph(
     coords: np.ndarray,
     indices: list[int],
+    avg_face: np.ndarray | None = None,
 ) -> dgl.DGLGraph:
     """
     Build a fully-connected DGL graph for one anatomical organ sub-graph.
@@ -203,12 +204,17 @@ def build_subgraph(
         Shape (468, 3) — **normalised** landmark coordinates for the whole face.
     indices : list[int]
         MediaPipe landmark indices belonging to this organ.
+    avg_face : np.ndarray | None
+        Shape (468, 3) — Universal Average Face (training-set mean).
+        When provided, node features are extended with per-landmark deviation
+        (Δx, Δy, Δz) from the average face, making the Averageness signal
+        explicit at the input level.  Results in NODE_FEAT_DIM = 6.
 
     Returns
     -------
     dgl.DGLGraph
         Graph with ``len(indices)`` nodes.
-        Node feature ``'feat'`` : float32 tensor of shape (N_nodes, 3).
+        Node feature ``'feat'`` : float32 tensor of shape (N_nodes, 3 or 6).
         Self-loops are included (via ``dgl.add_self_loop``).
     """
     n = len(indices)
@@ -225,18 +231,26 @@ def build_subgraph(
     g = dgl.graph((list(src_list), list(dst_list)), num_nodes=n)
     g = dgl.add_self_loop(g)
 
-    # Node features: normalised 3-D coordinates for this organ's nodes
-    node_feats = torch.tensor(
-        coords[indices],        # shape (N_nodes, 3)
-        dtype=torch.float32,
-    )
-    g.ndata["feat"] = node_feats
+    # Base node features: normalised 3-D coordinates
+    organ_coords = coords[indices]          # (N_nodes, 3)
+
+    if avg_face is not None:
+        # Augment with per-node deviation from the Universal Average Face.
+        # This makes the Averageness signal explicit rather than requiring
+        # the GAT to infer it from absolute coordinates alone.
+        deviation = organ_coords - avg_face[indices]   # (N_nodes, 3)
+        node_feats = np.concatenate([organ_coords, deviation], axis=1)  # (N_nodes, 6)
+    else:
+        node_feats = organ_coords           # (N_nodes, 3)
+
+    g.ndata["feat"] = torch.tensor(node_feats, dtype=torch.float32)
 
     return g
 
 
 def build_all_subgraphs(
     coords: np.ndarray,
+    avg_face: np.ndarray | None = None,
 ) -> dict[str, dgl.DGLGraph]:
     """
     Convenience wrapper: build all 5 organ sub-graphs from a single face.
@@ -245,6 +259,9 @@ def build_all_subgraphs(
     ----------
     coords : np.ndarray
         Shape (468, 3) — normalised landmark coordinates.
+    avg_face : np.ndarray | None
+        Shape (468, 3) — Universal Average Face. Passed through to
+        ``build_subgraph`` to enable 6-dim node features.
 
     Returns
     -------
@@ -253,7 +270,7 @@ def build_all_subgraphs(
         ``nose``, ``mouth``, ``jawline``.
     """
     return {
-        organ: build_subgraph(coords, idxs)
+        organ: build_subgraph(coords, idxs, avg_face=avg_face)
         for organ, idxs in ORGAN_INDICES.items()
     }
 

@@ -27,6 +27,7 @@ from pathlib import Path
 
 import dgl
 import numpy as np
+import pandas as pd
 import torch
 import torch.optim as optim
 from tqdm import tqdm
@@ -36,7 +37,7 @@ from dataset import FaceDataset, PairDataset, make_face_loader, make_pair_loader
 from evaluate import run_full_evaluation, validate_local_scores
 from loss import GradNorm, l_div, l_rank, l_reg
 from model import FaceRankNet
-from pseudo_labels import load_pseudo_labels
+from pseudo_labels import load_avg_face, load_pseudo_labels, validate_pseudo_label_quality
 
 # ---- Reproducibility ----
 torch.manual_seed(config.SEED)
@@ -108,9 +109,21 @@ def train(
 
     pseudo_labels = load_pseudo_labels(pseudo_labels_path)
 
+    # ---- Diagnostic: validate pseudo-label quality before training ----
+    train_df = pd.read_csv(train_csv)
+    holistic_ratings = dict(zip(
+        train_df[config.COL_FILENAME].tolist(),
+        train_df[config.COL_RATING].astype(float).tolist(),
+    ))
+    validate_pseudo_label_quality(pseudo_labels, holistic_ratings)
+
+    # avg_face is computed from training set only — safe to use for both
+    # train and test node features (no leakage).
+    avg_face = load_avg_face(str(config.AVG_FACE_CACHE))
+
     # ---- Datasets ----
-    train_face_ds = FaceDataset(train_csv, coords_train, pseudo_labels)
-    test_face_ds = FaceDataset(test_csv, coords_test)
+    train_face_ds = FaceDataset(train_csv, coords_train, pseudo_labels, avg_face=avg_face)
+    test_face_ds  = FaceDataset(test_csv,  coords_test,  avg_face=avg_face)
 
     pair_ds = PairDataset(train_face_ds)
 
@@ -121,7 +134,6 @@ def train(
         len(test_face_ds),
     )
 
-    pair_loader = make_pair_loader(pair_ds, shuffle=True, batch_size=batch_size)
     val_loader = make_face_loader(test_face_ds, shuffle=False, batch_size=batch_size)
 
     # ---- Model ----
@@ -185,6 +197,11 @@ def train(
 
     # ---- Epoch loop ----
     for epoch in range(start_epoch, num_epochs + 1):
+        # Resample pairs every epoch so the model sees different (A, B)
+        # combinations and doesn't overfit to a fixed set of pair orderings.
+        pair_ds._pairs = pair_ds._build_pairs()
+        pair_loader = make_pair_loader(pair_ds, shuffle=True, batch_size=batch_size)
+
         model.train()
         total_loss_accum = 0.0
         n_batches = 0
@@ -195,6 +212,7 @@ def train(
             sg_a = {k: v.to(device) for k, v in batch_a["subgraphs"].items()}
             sg_b = {k: v.to(device) for k, v in batch_b["subgraphs"].items()}
             ratings_a = batch_a["ratings"].to(device)
+            ratings_b = batch_b["ratings"].to(device)
             organ_mask = organ_mask.to(device)
 
             optimizer.zero_grad()
@@ -204,18 +222,24 @@ def train(
             out_b = model(sg_b)
 
             global_pred_a = out_a["global_score"]
+            global_pred_b = out_b["global_score"]
             local_a = out_a["local_scores"]
             local_b = out_b["local_scores"]
 
             # ---- Three losses ----
-            loss_reg = l_reg(global_pred_a, ratings_a)
+            # Use both faces for regression — previously only face A was used,
+            # wasting 50% of the available ground-truth signal each batch.
+            loss_reg  = (l_reg(global_pred_a, ratings_a) + l_reg(global_pred_b, ratings_b)) / 2
             loss_rank = l_rank(local_a, local_b, organ_mask)
-            loss_div = l_div(local_a)
+            loss_div  = l_div(local_a)
 
-            losses = [loss_reg, loss_rank, loss_div]
+            # L_div is negative (−Var) so it must NOT enter GradNorm,
+            # which only handles positive losses. Add it with a fixed weight.
+            losses = [loss_reg, loss_rank]
 
-            # ---- GradNorm: weighted total loss ----
+            # ---- GradNorm: weighted total loss (L_reg + L_rank only) ----
             total_loss = gradnorm.update(losses, optimizer)
+            total_loss = total_loss + config.LDIV_WEIGHT * loss_div
 
             # ---- Backward + step ----
             total_loss.backward()

@@ -43,7 +43,7 @@ COL_ETHNICITY: str = "Ethnicity"    # "Asian" | "Caucasian" | etc.
 # ---------------------------------------------------------------------------
 # Graph / sub-graph
 # ---------------------------------------------------------------------------
-NODE_FEAT_DIM: int = 3              # (x, y, z) per landmark
+NODE_FEAT_DIM: int = 6              # (x, y, z, Δx, Δy, Δz) — coords + deviation from avg face
 
 # ---------------------------------------------------------------------------
 # OrganGAT architecture
@@ -68,7 +68,8 @@ SCORE_MAX: float = 5.0
 # GradNorm (Chen et al. 2018)
 # ---------------------------------------------------------------------------
 GRADNORM_ALPHA: float = 1.5
-NUM_TASKS: int = 3                  # L_reg, L_rank, L_div
+NUM_TASKS: int = 2                  # L_reg, L_rank  (L_div handled separately)
+LDIV_WEIGHT: float = 0.01           # Fixed weight for diversity regularisation
 
 # ---------------------------------------------------------------------------
 # Training
@@ -89,7 +90,7 @@ PIN_MEMORY: bool = False  # pin_memory only benefits when num_workers > 0
 # Pair sampling
 # ---------------------------------------------------------------------------
 # Number of negative pairs per anchor in the ranking DataLoader
-PAIRS_PER_SAMPLE: int = 1
+PAIRS_PER_SAMPLE: int = 3
 
 # ---------------------------------------------------------------------------
 # Logging / display

@@ -96,7 +96,7 @@ def compute_organ_mse(
         MSE (non-negative scalar).
     """
     diff = coords[organ_indices] - avg_face[organ_indices]  # (N_nodes, 3)
-    return float(np.mean(diff ** 2))
+    return float(np.sqrt(np.mean(diff ** 2)))  # RMSE: unit-consistent across organs
 
 
 def compute_organ_pseudo_score(
@@ -202,6 +202,57 @@ def compute_all_pseudo_labels(
         len(train_filenames),
     )
     return pseudo_labels
+
+
+# ---------------------------------------------------------------------------
+# Pseudo-label quality diagnostic
+# ---------------------------------------------------------------------------
+
+def validate_pseudo_label_quality(
+    pseudo_labels: dict[str, dict[str, float]],
+    holistic_ratings: dict[str, float],
+) -> float:
+    """
+    Compute Spearman ρ between mean organ pseudo-score and holistic rating.
+
+    A low ρ (< 0.2) indicates the pseudo-labels are weakly correlated with
+    actual beauty scores — meaning L_rank may conflict with L_reg during training.
+
+    Parameters
+    ----------
+    pseudo_labels : dict[str, dict[str, float]]
+        Maps filename → {organ: pseudo_score}.
+    holistic_ratings : dict[str, float]
+        Maps filename → ground-truth holistic beauty score.
+
+    Returns
+    -------
+    float
+        Spearman ρ ∈ [-1, 1]. Prints a warning if ρ < 0.2.
+    """
+    from scipy.stats import spearmanr
+
+    common = [f for f in pseudo_labels if f in holistic_ratings]
+    if len(common) < 10:
+        logger.warning("Too few common samples (%d) to compute Spearman ρ.", len(common))
+        return float("nan")
+
+    mean_pseudo = [float(np.mean(list(pseudo_labels[f].values()))) for f in common]
+    ratings     = [holistic_ratings[f] for f in common]
+
+    rho, p_val = spearmanr(mean_pseudo, ratings)
+    level = "✓ GOOD" if rho >= 0.3 else ("~ WEAK" if rho >= 0.1 else "✗ POOR")
+    logger.info(
+        "Pseudo-label quality — Spearman ρ = %.4f  (p=%.4f)  %s  [n=%d]",
+        rho, p_val, level, len(common),
+    )
+    if rho < 0.2:
+        logger.warning(
+            "Spearman ρ = %.4f < 0.2 — pseudo-labels are weakly aligned with "
+            "holistic ratings. L_rank may conflict with L_reg during training.",
+            rho,
+        )
+    return float(rho)
 
 
 # ---------------------------------------------------------------------------
