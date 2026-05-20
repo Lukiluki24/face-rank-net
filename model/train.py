@@ -75,6 +75,7 @@ def train(
     landmark_cache_train: str,
     landmark_cache_test: str,
     pseudo_labels_path: str,
+    avg_face_path: str = str(config.AVG_FACE_CACHE),
     num_epochs: int = config.NUM_EPOCHS,
     batch_size: int = config.BATCH_SIZE,
     lr: float = config.LR,
@@ -119,7 +120,7 @@ def train(
 
     # avg_face is computed from training set only — safe to use for both
     # train and test node features (no leakage).
-    avg_face = load_avg_face(str(config.AVG_FACE_CACHE))
+    avg_face = load_avg_face(avg_face_path)
 
     # ---- Datasets ----
     train_face_ds = FaceDataset(train_csv, coords_train, pseudo_labels, avg_face=avg_face)
