@@ -159,12 +159,18 @@ class PairDataset(Dataset):
                 k=min(self.pairs_per_sample * 10, n - 1),
             )
 
+            rating_a = self.ds.ratings[a_idx]
             added = 0
             for b_idx in candidates:
                 pseudo_b = self.ds.pseudo_labels.get(
                     self.ds.filenames[b_idx], {}
                 )
                 if not pseudo_b:
+                    continue
+
+                # H2: only train L_rank when holistic order agrees with pseudo order
+                rating_b = self.ds.ratings[b_idx]
+                if rating_a <= rating_b:
                     continue
 
                 # Valid if A scores higher than B in at least one organ

@@ -139,10 +139,39 @@ def compute_organ_pseudo_score(
 # Dataset-level pseudo-label computation
 # ---------------------------------------------------------------------------
 
+def compute_ethnicity_avg_faces(
+    coords_cache: dict[str, np.ndarray],
+    train_filenames: list[str],
+    ethnicity_map: dict[str, str],
+) -> dict[str, np.ndarray]:
+    """
+    Compute per-ethnicity Universal Average Faces (H1 refinement).
+
+    Returns dict mapping ethnicity string → (468, 3) avg face array.
+    Falls back to global average for unknown ethnicities.
+    """
+    groups: dict[str, list[np.ndarray]] = {}
+    for fname in train_filenames:
+        if fname not in coords_cache:
+            continue
+        eth = ethnicity_map.get(fname, "Unknown")
+        groups.setdefault(eth, []).append(coords_cache[fname])
+
+    result = {}
+    for eth, coords_list in groups.items():
+        result[eth] = compute_universal_average_face(coords_list)
+        logger.info(
+            "Average face for '%s' computed from %d faces.", eth, len(coords_list)
+        )
+    return result
+
+
 def compute_all_pseudo_labels(
     coords_cache: dict[str, np.ndarray],
     avg_face: np.ndarray,
     train_filenames: list[str],
+    avg_face_map: dict[str, np.ndarray] | None = None,
+    ethnicity_map: dict[str, str] | None = None,
 ) -> dict[str, dict[str, float]]:
     """
     Compute pseudo-labels for every image in the training set.
@@ -171,11 +200,17 @@ def compute_all_pseudo_labels(
     organ_mse_all: dict[str, list[float]] = {o: [] for o in ORGAN_INDICES}
     valid_fnames = [f for f in train_filenames if f in coords_cache]
 
+    use_ethnicity = avg_face_map is not None and ethnicity_map is not None
+
     for fname in tqdm(valid_fnames, desc="Pass 1 — collecting MSEs", unit="face"):
         coords = coords_cache[fname]
+        face_avg = avg_face
+        if use_ethnicity:
+            eth = ethnicity_map.get(fname, "Unknown")
+            face_avg = avg_face_map.get(eth, avg_face)
         for organ, idxs in ORGAN_INDICES.items():
             organ_mse_all[organ].append(
-                compute_organ_mse(coords, avg_face, idxs)
+                compute_organ_mse(coords, face_avg, idxs)
             )
 
     max_mse_per_organ: dict[str, float] = {
@@ -189,9 +224,13 @@ def compute_all_pseudo_labels(
 
     for fname in tqdm(valid_fnames, desc="Pass 2 — pseudo scores", unit="face"):
         coords = coords_cache[fname]
+        face_avg = avg_face
+        if use_ethnicity:
+            eth = ethnicity_map.get(fname, "Unknown")
+            face_avg = avg_face_map.get(eth, avg_face)
         pseudo_labels[fname] = {
             organ: compute_organ_pseudo_score(
-                coords, avg_face, idxs, max_mse_per_organ[organ]
+                coords, face_avg, idxs, max_mse_per_organ[organ]
             )
             for organ, idxs in ORGAN_INDICES.items()
         }
