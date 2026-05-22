@@ -58,6 +58,10 @@ GAT_DROPOUT: float = 0.1
 ORGAN_NAMES: list[str] = ["left_eye", "right_eye", "nose", "mouth", "jawline"]
 NUM_ORGANS: int = len(ORGAN_NAMES)
 
+# Cross-organ attention heads (B2). embed_dim = GAT_HIDDEN_DIM × GAT_NUM_HEADS = 256.
+# Must divide evenly into embed_dim (256 / 4 = 64 per head).
+CROSS_ORGAN_HEADS: int = 4
+
 # ---------------------------------------------------------------------------
 # Score range enforcement: 4 * sigmoid(x) + 1  →  (1, 5)
 # ---------------------------------------------------------------------------

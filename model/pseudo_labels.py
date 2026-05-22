@@ -185,6 +185,68 @@ def compute_beauty_prototype(
     return prototype.astype(np.float32)
 
 
+def compute_beauty_axis(
+    population_mean: np.ndarray,
+    beauty_prototype: np.ndarray,
+) -> np.ndarray:
+    """
+    Beauty axis = direction from population mean → beauty prototype in face space.
+
+    Following Valentine (1991) face space framework: faces are points in a
+    multidimensional space. Said & Todorov (2011) showed attractiveness is
+    better modelled as a *direction* in this space than as proximity to a
+    fixed prototype. DeBruine & Jones (2007) demonstrate caricatured beautiful
+    faces are mathematically farther from the mean but more attractive — they
+    lie *along* the beauty axis, not near a single ideal point.
+
+    Parameters
+    ----------
+    population_mean : np.ndarray, shape (468, 3)
+        Element-wise mean of all training faces.
+    beauty_prototype : np.ndarray, shape (468, 3)
+        Mean of top-k% highest-rated training faces.
+
+    Returns
+    -------
+    np.ndarray, shape (468, 3)
+        Unnormalised beauty direction vector (per-landmark Δ).
+    """
+    return (beauty_prototype - population_mean).astype(np.float32)
+
+
+def project_organ_onto_axis(
+    coords: np.ndarray,
+    population_mean: np.ndarray,
+    beauty_axis: np.ndarray,
+    organ_indices: list[int],
+) -> float:
+    """
+    Scalar projection of an organ's geometric deviation onto the beauty axis.
+
+    Positive  → organ deviates from the population mean *toward* the beauty
+                direction (more attractive).
+    Zero      → orthogonal to beauty direction (typical / neutral).
+    Negative  → opposite of beauty direction (less attractive).
+
+    Parameters
+    ----------
+    coords : np.ndarray, shape (468, 3)
+    population_mean : np.ndarray, shape (468, 3)
+    beauty_axis : np.ndarray, shape (468, 3)
+    organ_indices : list[int]
+    """
+    deviation = coords[organ_indices] - population_mean[organ_indices]  # (n, 3)
+    axis      = beauty_axis[organ_indices]                              # (n, 3)
+
+    dev_flat  = deviation.ravel()
+    axis_flat = axis.ravel()
+
+    axis_norm = float(np.linalg.norm(axis_flat))
+    if axis_norm < 1e-12:
+        return 0.0
+    return float(np.dot(dev_flat, axis_flat) / axis_norm)
+
+
 def compute_ethnicity_avg_faces(
     coords_cache: dict[str, np.ndarray],
     train_filenames: list[str],
@@ -313,6 +375,135 @@ def compute_all_pseudo_labels(
         "Pseudo-labels computed for %d / %d training images.",
         len(pseudo_labels),
         len(train_filenames),
+    )
+    return pseudo_labels
+
+
+# ---------------------------------------------------------------------------
+# Beauty-axis pseudo-label computation
+# ---------------------------------------------------------------------------
+
+def compute_all_pseudo_labels_beauty_axis(
+    coords_cache: dict[str, np.ndarray],
+    train_filenames: list[str],
+    population_mean: np.ndarray,
+    beauty_prototype: np.ndarray,
+    population_mean_map: dict[str, np.ndarray] | None = None,
+    beauty_prototype_map: dict[str, np.ndarray] | None = None,
+    ethnicity_map: dict[str, str] | None = None,
+) -> dict[str, dict[str, float]]:
+    """
+    Compute per-organ pseudo-labels via beauty-axis projection.
+
+    Pipeline
+    --------
+    1. Build beauty_axis = beauty_prototype − population_mean.
+    2. For each face / organ: scalar-project (face − population_mean) onto
+       the organ-portion of beauty_axis.
+    3. Percentile-rank projections across the dataset → score ∈ [1, 5].
+       Direction: higher projection (further along the beauty axis) →
+       higher score.
+
+    Score interpretation
+    --------------------
+    Unlike the RMSE-from-prototype formulation, faces that geometrically
+    differ from the mean *toward* the beauty direction receive high scores,
+    even when they are far from the mean overall.  This addresses the
+    DeBruine & Jones (2007) critique that attractive faces are not always
+    average — they often lie along a directional axis in face space.
+
+    Parameters
+    ----------
+    coords_cache : dict[str, np.ndarray]
+        Filename → (468, 3) normalised coords.
+    train_filenames : list[str]
+        Ordered training-set filenames.
+    population_mean : np.ndarray, shape (468, 3)
+        Global population mean (fallback if ethnicity_map missing).
+    beauty_prototype : np.ndarray, shape (468, 3)
+        Global beauty prototype (top-k% mean).
+    population_mean_map : dict[str, (468, 3)] | None
+        Per-ethnicity population means.  H1 refinement.
+    beauty_prototype_map : dict[str, (468, 3)] | None
+        Per-ethnicity beauty prototypes.  H1 refinement.
+    ethnicity_map : dict[str, str] | None
+        Filename → ethnicity label.
+
+    Returns
+    -------
+    dict[str, dict[str, float]]
+        Filename → {organ_name: pseudo_score ∈ [1, 5]}.
+    """
+    valid_fnames = [f for f in train_filenames if f in coords_cache]
+    use_ethnicity = (
+        population_mean_map is not None
+        and beauty_prototype_map is not None
+        and ethnicity_map is not None
+    )
+
+    # Pre-compute beauty axes (per ethnicity or global)
+    global_axis = compute_beauty_axis(population_mean, beauty_prototype)
+    axis_map: dict[str, np.ndarray] = {}
+    if use_ethnicity:
+        for eth in beauty_prototype_map:
+            mu_eth = population_mean_map.get(eth, population_mean)
+            axis_map[eth] = compute_beauty_axis(mu_eth, beauty_prototype_map[eth])
+        logger.info(
+            "Per-ethnicity beauty axes computed: %s",
+            {eth: ax.shape for eth, ax in axis_map.items()},
+        )
+
+    # ---- Pass 1: collect projections per organ ----
+    organ_proj_all: dict[str, list[float]] = {o: [] for o in ORGAN_INDICES}
+
+    for fname in tqdm(valid_fnames, desc="Pass 1 — projections", unit="face"):
+        coords = coords_cache[fname]
+        if use_ethnicity:
+            eth  = ethnicity_map.get(fname, "Unknown")
+            mu   = population_mean_map.get(eth, population_mean)
+            axis = axis_map.get(eth, global_axis)
+        else:
+            mu, axis = population_mean, global_axis
+
+        for organ, idxs in ORGAN_INDICES.items():
+            proj = project_organ_onto_axis(coords, mu, axis, idxs)
+            organ_proj_all[organ].append(proj)
+
+    organ_sorted: dict[str, list[float]] = {
+        o: sorted(v) for o, v in organ_proj_all.items()
+    }
+    logger.info(
+        "Organ projection ranges (min→max): %s",
+        {o: (round(v[0], 5), round(v[-1], 5)) for o, v in organ_sorted.items()},
+    )
+
+    # ---- Pass 2: percentile rank → score ∈ [1, 5] ----
+    # Higher projection (further along beauty axis) → higher score.
+    pseudo_labels: dict[str, dict[str, float]] = {}
+
+    for fname in tqdm(valid_fnames, desc="Pass 2 — pseudo scores", unit="face"):
+        coords = coords_cache[fname]
+        if use_ethnicity:
+            eth  = ethnicity_map.get(fname, "Unknown")
+            mu   = population_mean_map.get(eth, population_mean)
+            axis = axis_map.get(eth, global_axis)
+        else:
+            mu, axis = population_mean, global_axis
+
+        scores: dict[str, float] = {}
+        for organ, idxs in ORGAN_INDICES.items():
+            proj = project_organ_onto_axis(coords, mu, axis, idxs)
+            sorted_vals = organ_sorted[organ]
+            n = len(sorted_vals)
+            rank = bisect.bisect_left(sorted_vals, proj) / n  # ∈ [0, 1)
+            # Higher projection → higher rank → higher score
+            score = float(np.clip(1.0 + 4.0 * rank, 1.0, 5.0))
+            scores[organ] = score
+        pseudo_labels[fname] = scores
+
+    logger.info(
+        "Beauty-axis pseudo-labels computed for %d / %d training images.",
+        len(pseudo_labels), len(train_filenames),
     )
     return pseudo_labels
 

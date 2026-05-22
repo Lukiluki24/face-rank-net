@@ -275,6 +275,53 @@ def build_all_subgraphs(
     }
 
 
+def build_all_subgraphs_flipped(
+    coords: np.ndarray,
+    avg_face: np.ndarray | None = None,
+) -> dict[str, dgl.DGLGraph]:
+    """
+    Build organ sub-graphs for a horizontally flipped face.
+
+    Flips the X axis of coords and swaps left_eye ↔ right_eye so the graph
+    structure remains anatomically correct (left eye still uses left-eye
+    landmark indices after the flip becomes the right eye in image space,
+    but we preserve the semantic label by swapping the source indices).
+
+    Parameters
+    ----------
+    coords : np.ndarray
+        Shape (468, 3) — normalised coords for the *original* (un-flipped) face.
+    avg_face : np.ndarray | None
+        Shape (468, 3) — Universal Average Face.  Passed through to
+        ``build_subgraph`` to enable 6-dim node features.
+
+    Returns
+    -------
+    dict[str, dgl.DGLGraph]
+        Same keys as ``build_all_subgraphs``.
+    """
+    # Flip X axis; Y and Z are unchanged
+    coords_flipped = coords.copy()
+    coords_flipped[:, 0] *= -1
+
+    # Mirror the average face too (so deviations are computed correctly)
+    avg_flipped: np.ndarray | None = None
+    if avg_face is not None:
+        avg_flipped = avg_face.copy()
+        avg_flipped[:, 0] *= -1
+
+    # Swap left ↔ right eye (anatomically correct after horizontal flip)
+    _swap = {"left_eye": "right_eye", "right_eye": "left_eye"}
+    result: dict[str, dgl.DGLGraph] = {}
+    for organ, idxs in ORGAN_INDICES.items():
+        src_organ = _swap.get(organ, organ)
+        src_idxs = ORGAN_INDICES[src_organ]
+        result[organ] = build_subgraph(
+            coords_flipped, src_idxs, avg_face=avg_flipped
+        )
+    return result
+
+
 def preprocess_dataset(
     image_dir: str,
     csv_path: str,

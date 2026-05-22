@@ -14,11 +14,13 @@ Two nn.Module classes:
 
   FaceRankNet
       One OrganGAT per organ (5 total).
-      Learnable fusion weights w ∈ ℝ^5 → softmax → weighted sum.
+      Cross-organ MultiheadAttention fuses organ embeddings → global score.
+      Learnable fusion_weights kept for interpretability only.
       forward() returns a dict with keys:
           'local_scores'  : dict[str, Tensor]  – one scalar per organ
-          'global_score'  : Tensor             – weighted sum (shape: scalar)
-          'organ_weights' : Tensor             – softmax(w), shape (5,)
+          'global_score'  : Tensor             – cross-organ attended score, shape (B,)
+          'organ_weights' : Tensor             – softmax(w), shape (5,) [interpretability]
+          'attn_weights'  : Tensor             – cross-organ attention map, shape (B, 5, 5)
 
 Reproducibility: torch.manual_seed(42), dgl.seed(42) set at module level.
 No pixel data is loaded anywhere in this file.
@@ -83,7 +85,7 @@ class OrganGAT(nn.Module):
         # 1. Input projection: Linear(3 → hidden_dim)
         self.input_proj = nn.Linear(in_feats, hidden_dim, bias=True)
 
-        # 2. GATConv: (hidden_dim, hidden_dim × num_heads)
+        # 2. GATConv layer 1: (hidden_dim → hidden_dim × num_heads)
         #    allow_zero_in_degree=True because self-loops are added externally
         self.gat = dglnn.GATConv(
             in_feats=hidden_dim,
@@ -111,28 +113,34 @@ class OrganGAT(nn.Module):
             nn.Linear(32, 1),
         )
 
-    def forward(self, g: dgl.DGLGraph) -> torch.Tensor:
+    def forward(
+        self,
+        g: dgl.DGLGraph,
+        return_embedding: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """
         Parameters
         ----------
         g : dgl.DGLGraph
             Batched or single DGL graph.
-            Node feature key: 'feat', shape (total_nodes, 3).
+            Node feature key: 'feat', shape (total_nodes, in_feats).
+        return_embedding : bool
+            When True, returns (score, pooled_embedding) so FaceRankNet can
+            collect organ embeddings for cross-organ attention.
 
         Returns
         -------
-        torch.Tensor
-            Organ score(s) in (1, 5).
-            Shape: scalar if single graph, (B,) if batched.
+        torch.Tensor | tuple[torch.Tensor, torch.Tensor]
+            score  : shape () or (B,), values in (1, 5)
+            embed  : shape (B, hidden_dim × num_heads) — only when return_embedding=True
         """
-        h = g.ndata["feat"]                          # (total_nodes, 3)
+        h = g.ndata["feat"]                          # (total_nodes, in_feats)
 
         # Input projection
         h = self.dropout(F.elu(self.input_proj(h)))  # (total_nodes, hidden)
 
         # GAT: output shape → (total_nodes, num_heads, hidden_dim)
         h = self.gat(g, h)                           # (N, heads, hidden)
-        # Flatten heads
         h = h.view(h.shape[0], -1)                   # (N, heads × hidden)
 
         # Attention pooling: weighted sum of node features based on learned attention
@@ -140,8 +148,11 @@ class OrganGAT(nn.Module):
 
         # MLP → scalar score per graph
         logit = self.mlp(pooled).squeeze(-1)         # (B,) or scalar
+        score = scale_to_score(logit)                # ∈ (1, 5)
 
-        return scale_to_score(logit)                 # ∈ (1, 5)
+        if return_embedding:
+            return score, pooled
+        return score
 
 
 # ---------------------------------------------------------------------------
@@ -170,9 +181,26 @@ class FaceRankNet(nn.Module):
             {organ: OrganGAT(**kwargs) for organ in ORGAN_ORDER}
         )
 
-        # Learnable fusion weights (5,) — softmax applied in forward()
+        # Learnable fusion weights (5,) — kept for interpretability (organ importance)
         self.fusion_weights = nn.Parameter(
             torch.ones(config.NUM_ORGANS, dtype=torch.float32)
+        )
+
+        # Cross-organ attention: captures inter-organ proportion relationships
+        embed_dim = config.GAT_HIDDEN_DIM * config.GAT_NUM_HEADS  # 256
+        self.cross_organ_attn = nn.MultiheadAttention(
+            embed_dim=embed_dim,
+            num_heads=config.CROSS_ORGAN_HEADS,
+            dropout=config.GAT_DROPOUT,
+            batch_first=True,
+        )
+
+        # Global score MLP: operates on cross-organ attended embeddings
+        self.global_mlp = nn.Sequential(
+            nn.Linear(embed_dim, 64),
+            nn.ELU(),
+            nn.Dropout(p=config.GAT_DROPOUT),
+            nn.Linear(64, 1),
         )
 
     def forward(
@@ -190,28 +218,35 @@ class FaceRankNet(nn.Module):
         -------
         dict with keys:
             'local_scores'  : dict[str, Tensor] — shape () or (B,) per organ
-            'global_score'  : Tensor            — weighted sum, shape () or (B,)
-            'organ_weights' : Tensor            — softmax(w), shape (5,)
+            'global_score'  : Tensor            — cross-organ attended score, shape (B,)
+            'organ_weights' : Tensor            — softmax(w), shape (5,)  [interpretability]
+            'attn_weights'  : Tensor            — cross-organ attention map, shape (B, 5, 5)
         """
         local_scores: dict[str, torch.Tensor] = {}
+        organ_embeds: list[torch.Tensor] = []
+
         for organ in ORGAN_ORDER:
-            g = subgraphs[organ]
-            score = self.organ_gats[organ](g)       # () or (B,)
-            local_scores[organ] = score
+            score, embed = self.organ_gats[organ](subgraphs[organ], return_embedding=True)
+            local_scores[organ] = score          # () or (B,)
+            organ_embeds.append(embed)           # (B, embed_dim)
 
-        # Stack organ scores: (5,) or (B, 5)
-        score_stack = torch.stack(
-            [local_scores[o] for o in ORGAN_ORDER], dim=-1
-        )  # (B, 5) or (5,)
-
-        # Normalised fusion weights
+        # Normalised fusion weights — kept for interpretability output only
         organ_weights = torch.softmax(self.fusion_weights, dim=0)  # (5,)
 
-        # Weighted sum
-        global_score = (score_stack * organ_weights).sum(dim=-1)   # (B,) or ()
+        # Cross-organ attention: (B, 5, embed_dim)
+        embeds = torch.stack(organ_embeds, dim=1)              # (B, 5, embed_dim)
+        attn_out, attn_weights = self.cross_organ_attn(
+            embeds, embeds, embeds
+        )  # attn_out: (B, 5, embed_dim); attn_weights: (B, 5, 5)
+
+        # Mean-pool attended embeddings → global score
+        global_embed = attn_out.mean(dim=1)                    # (B, embed_dim)
+        global_logit = self.global_mlp(global_embed).squeeze(-1)  # (B,)
+        global_score = scale_to_score(global_logit)            # (B,) ∈ (1, 5)
 
         return {
             "local_scores": local_scores,
             "global_score": global_score,
             "organ_weights": organ_weights,
+            "attn_weights": attn_weights,        # (B, 5, 5) — visualizable
         }

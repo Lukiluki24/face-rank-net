@@ -30,7 +30,7 @@ from torch.utils.data import DataLoader, Dataset
 
 import config
 from organ_indices import ORGAN_INDICES
-from preprocessing import build_all_subgraphs
+from preprocessing import build_all_subgraphs, build_all_subgraphs_flipped
 
 np.random.seed(config.SEED)
 random.seed(config.SEED)
@@ -65,6 +65,7 @@ class FaceDataset(Dataset):
         coords_cache: dict[str, np.ndarray],
         pseudo_labels: dict[str, dict[str, float]] | None = None,
         avg_face: np.ndarray | None = None,
+        augment_flip: bool = False,
     ) -> None:
         df = pd.read_csv(csv_path)
 
@@ -78,13 +79,28 @@ class FaceDataset(Dataset):
             )
         df = df[mask].reset_index(drop=True)
 
-        self.filenames: list[str] = df[config.COL_FILENAME].tolist()
-        self.ratings: list[float] = df[config.COL_RATING].astype(float).tolist()
-        self.ethnicities: list[str | None] = (
+        base_filenames: list[str] = df[config.COL_FILENAME].tolist()
+        base_ratings: list[float] = df[config.COL_RATING].astype(float).tolist()
+        base_ethnicities: list[str | None] = (
             df[config.COL_ETHNICITY].tolist()
             if config.COL_ETHNICITY in df.columns
             else [None] * len(df)
         )
+
+        if augment_flip:
+            # Duplicate dataset: original + mirrored copies
+            self.filenames = base_filenames + base_filenames
+            self.ratings   = base_ratings   + base_ratings
+            self.ethnicities = base_ethnicities + base_ethnicities
+            self._is_flipped: list[bool] = (
+                [False] * len(base_filenames) + [True] * len(base_filenames)
+            )
+        else:
+            self.filenames   = base_filenames
+            self.ratings     = base_ratings
+            self.ethnicities = base_ethnicities
+            self._is_flipped = [False] * len(base_filenames)
+
         self.coords_cache = coords_cache
         self.pseudo_labels = pseudo_labels or {}
         self.avg_face = avg_face  # None → 3-dim features; provided → 6-dim
@@ -95,7 +111,10 @@ class FaceDataset(Dataset):
     def __getitem__(self, idx: int) -> dict:
         fname = self.filenames[idx]
         coords = self.coords_cache[fname]                            # (468, 3)
-        subgraphs = build_all_subgraphs(coords, self.avg_face)      # dict[str, DGLGraph]
+        if self._is_flipped[idx]:
+            subgraphs = build_all_subgraphs_flipped(coords, self.avg_face)
+        else:
+            subgraphs = build_all_subgraphs(coords, self.avg_face)  # dict[str, DGLGraph]
 
         rating = torch.tensor(self.ratings[idx], dtype=torch.float32)
 

@@ -234,9 +234,15 @@ def train(
             loss_rank = l_rank(local_a, local_b, organ_mask)
             loss_div  = l_div(local_a)
 
+            # A1: freeze L_rank first 10 epochs so L_reg establishes a stable
+            # regression baseline before noisy pseudo-labels start competing.
+            if epoch <= 10:
+                losses = [loss_reg, torch.zeros_like(loss_rank)]
+            else:
+                losses = [loss_reg, loss_rank]
+
             # L_div is negative (−Var) so it must NOT enter GradNorm,
             # which only handles positive losses. Add it with a fixed weight.
-            losses = [loss_reg, loss_rank]
 
             # ---- GradNorm: weighted total loss (L_reg + L_rank only) ----
             total_loss = gradnorm.update(losses, optimizer)
