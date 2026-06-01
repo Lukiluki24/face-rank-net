@@ -38,20 +38,30 @@ ORGAN_ORDER: list[str] = config.ORGAN_NAMES
 def l_reg(
     global_pred: torch.Tensor,
     global_gt: torch.Tensor,
+    weights: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
-    Standard Mean Squared Error between predicted and true beauty scores.
+    Mean Squared Error between predicted and true beauty scores.
 
     Parameters
     ----------
     global_pred : Tensor, shape (B,)
     global_gt   : Tensor, shape (B,)
+    weights     : Tensor, shape (B,) or None
+        Optional per-sample weights for Label Distribution Smoothing
+        (Yang et al. 2021). When provided, returns the weighted mean
+        of squared errors; when None, falls back to plain F.mse_loss.
 
     Returns
     -------
-    Tensor — scalar MSE.
+    Tensor — scalar (weighted) MSE.
     """
-    return F.mse_loss(global_pred, global_gt.to(global_pred.dtype))
+    gt = global_gt.to(global_pred.dtype)
+    if weights is None:
+        return F.mse_loss(global_pred, gt)
+    w = weights.to(global_pred.dtype)
+    diff_sq = (global_pred - gt) ** 2
+    return (w * diff_sq).sum() / w.sum().clamp(min=1e-8)
 
 
 # ---------------------------------------------------------------------------

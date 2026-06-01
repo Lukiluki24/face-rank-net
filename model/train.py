@@ -132,13 +132,20 @@ def train(
     # Step 1: enable landmark jitter on train set only.  Combined with the
     # WeightedRandomSampler below, this gives minority-class faces fresh
     # geometric variation each time they are resampled.
+    # Sprint 2: LDS rating weights + within-bucket MixUp activated on TRAIN
+    # only (test stays clean for unbiased evaluation).
     train_face_ds = FaceDataset(
         train_csv, coords_train, pseudo_labels, avg_face=avg_face,
         augment_jitter=config.AUGMENT_JITTER,
+        compute_lds_weights=config.USE_INVERSE_FREQ_L_REG,
+        mixup_within_bucket=config.USE_WITHIN_BUCKET_MIXUP,
     )
     test_face_ds  = FaceDataset(test_csv,  coords_test,  avg_face=avg_face)
 
-    pair_ds = PairDataset(train_face_ds)
+    pair_ds = PairDataset(
+        train_face_ds,
+        hard_pair_sampling=config.USE_HARD_PAIR_SAMPLING,
+    )
 
     logger.info(
         "Datasets — train faces: %d | pairs: %d | test: %d",
@@ -258,6 +265,13 @@ def train(
             ratings_a = batch_a["ratings"].to(device)
             ratings_b = batch_b["ratings"].to(device)
             organ_mask = organ_mask.to(device)
+            # LDS weights (None when flag is off — falls back to plain MSE)
+            if config.USE_INVERSE_FREQ_L_REG:
+                w_a = batch_a["rating_weights"].to(device)
+                w_b = batch_b["rating_weights"].to(device)
+            else:
+                w_a = None
+                w_b = None
 
             optimizer.zero_grad()
 
@@ -273,7 +287,10 @@ def train(
             # ---- Three losses ----
             # Use both faces for regression — previously only face A was used,
             # wasting 50% of the available ground-truth signal each batch.
-            loss_reg  = (l_reg(global_pred_a, ratings_a) + l_reg(global_pred_b, ratings_b)) / 2
+            loss_reg = (
+                l_reg(global_pred_a, ratings_a, weights=w_a)
+                + l_reg(global_pred_b, ratings_b, weights=w_b)
+            ) / 2
             loss_rank = l_rank(local_a, local_b, organ_mask)
             loss_div  = l_div(local_a)
 

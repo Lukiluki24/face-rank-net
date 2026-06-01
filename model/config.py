@@ -137,6 +137,37 @@ AUGMENT_JITTER: bool = True
 JITTER_STD: float = 0.003
 
 # ---------------------------------------------------------------------------
+# Tail / score-compression fixes (Sprint 2 — all training-side)
+# Defaults are enabled; flip individual flags for ablation studies.
+# ---------------------------------------------------------------------------
+
+# Inverse-frequency weighting on L_reg (Label Distribution Smoothing, Yang
+# et al. 2021 ICML "Delving into Deep Imbalanced Regression"). Down-weights
+# samples in dense rating regions, up-weights tail samples so the model is
+# penalised more heavily when it under-predicts Cantik / over-predicts Jelek.
+USE_INVERSE_FREQ_L_REG: bool = True
+LREG_LDS_BANDWIDTH: float = 0.3       # KDE bandwidth over rating distribution
+LREG_WEIGHT_FLOOR: float = 0.2        # min weight (avoid div-by-zero / runaway)
+
+# Hard Pair Sampling: bias PairDataset candidate selection toward partners
+# in distant rating buckets so each anchor sees more extreme contrasts per
+# epoch (Jelek vs Cantik, etc.). Random pairing gives ~0.5 % such pairs.
+USE_HARD_PAIR_SAMPLING: bool = True
+
+# Training-time within-bucket MixUp (Paradigma A): mix coords + linearly
+# interpolate pseudo-labels inside FaceDataset.__getitem__. OFF by default
+# because we prefer Paradigma B — pseudo-label-time MixUp (synthaug method
+# in pseudo_labels.compute_all_pseudo_labels_axis_synthaug) which assigns
+# each synthetic face a geometric pseudo-label from the actual mixed
+# landmarks rather than a linear interpolation of the parents' labels.
+# Flip to True for ablation studies comparing the two paradigms.
+USE_WITHIN_BUCKET_MIXUP: bool = False
+MIXUP_PROB: float = 0.5               # probability of applying MixUp per __getitem__
+MIXUP_ALPHA: float = 0.4              # Beta(α, α) — small α favours near-identity mixes
+MIXUP_TAIL_BUCKETS_ONLY: bool = True  # only apply to Jelek (0) and Cantik (3)
+MIXUP_BUCKET_EDGES: tuple[float, ...] = (2.0, 3.0, 4.0)
+
+# ---------------------------------------------------------------------------
 # Logging / display
 # ---------------------------------------------------------------------------
 LOG_EVERY_N_BATCHES: int = 50

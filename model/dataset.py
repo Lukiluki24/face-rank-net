@@ -68,6 +68,8 @@ class FaceDataset(Dataset):
         augment_flip: bool = False,
         augment_jitter: bool = False,
         jitter_std: float = config.JITTER_STD,
+        compute_lds_weights: bool = False,
+        mixup_within_bucket: bool = False,
     ) -> None:
         df = pd.read_csv(csv_path)
 
@@ -109,12 +111,93 @@ class FaceDataset(Dataset):
         self.augment_jitter = augment_jitter
         self.jitter_std = jitter_std
 
+        # ---- LDS (Label Distribution Smoothing) per-sample weights ----
+        # Used by l_reg(weights=...) to penalise rare-rating errors more.
+        # Precomputed once on train ratings; test set should pass False.
+        if compute_lds_weights:
+            self._rating_weights = self._build_lds_weights(self.ratings)
+        else:
+            self._rating_weights = [1.0] * len(self.filenames)
+
+        # ---- Within-bucket MixUp setup ----
+        self.mixup_within_bucket = mixup_within_bucket
+        edges = config.MIXUP_BUCKET_EDGES
+        self._bucket_assignment = [_bucket_of(r, edges) for r in self.ratings]
+        self._bucket_to_indices: dict[int, list[int]] = {}
+        for i, b in enumerate(self._bucket_assignment):
+            self._bucket_to_indices.setdefault(b, []).append(i)
+        if self.mixup_within_bucket:
+            import logging
+            log = logging.getLogger(__name__)
+            log.info(
+                "Within-bucket MixUp enabled (prob=%.2f, α=%.2f, tail-only=%s).",
+                config.MIXUP_PROB, config.MIXUP_ALPHA, config.MIXUP_TAIL_BUCKETS_ONLY,
+            )
+
+    @staticmethod
+    def _build_lds_weights(ratings: list[float]) -> list[float]:
+        """
+        Compute per-sample inverse-density weights via KDE over rating
+        distribution. Follows Yang et al. 2021 (LDS, ICML).
+        """
+        from scipy.stats import gaussian_kde
+
+        arr = np.asarray(ratings, dtype=np.float64)
+        kde = gaussian_kde(arr, bw_method=config.LREG_LDS_BANDWIDTH)
+        density = kde(arr)
+        # Inverse density, floor to prevent runaway weights at extreme tails
+        inv = 1.0 / np.clip(density, config.LREG_WEIGHT_FLOOR, None)
+        # Normalise to mean 1 so the loss scale stays comparable to plain MSE
+        inv = inv * (len(inv) / inv.sum())
+        return inv.tolist()
+
     def __len__(self) -> int:
         return len(self.filenames)
 
     def __getitem__(self, idx: int) -> dict:
         fname = self.filenames[idx]
         coords = self.coords_cache[fname]                            # (468, 3)
+        rating_val = float(self.ratings[idx])
+        weight_val = float(self._rating_weights[idx])
+
+        pseudo = self.pseudo_labels.get(fname, {})
+        pseudo_arr = np.array(
+            [pseudo.get(o, 3.0) for o in ORGAN_ORDER], dtype=np.float32
+        )
+
+        # ---- Within-bucket MixUp ----
+        # When enabled, sometimes mix this face with another face from the
+        # SAME rating bucket: extra tail diversity (Jelek↔Jelek, Cantik↔
+        # Cantik). Skipped for flipped duplicates so we don't double-mix.
+        if (
+            self.mixup_within_bucket
+            and not self._is_flipped[idx]
+            and np.random.rand() < config.MIXUP_PROB
+        ):
+            my_bucket = self._bucket_assignment[idx]
+            tail_only = config.MIXUP_TAIL_BUCKETS_ONLY
+            n_buckets = len(config.MIXUP_BUCKET_EDGES) + 1
+            is_tail = my_bucket == 0 or my_bucket == n_buckets - 1
+            if (not tail_only or is_tail):
+                pool = [i for i in self._bucket_to_indices.get(my_bucket, [])
+                        if i != idx and not self._is_flipped[i]]
+                if pool:
+                    partner_idx = pool[np.random.randint(len(pool))]
+                    α = float(np.random.beta(config.MIXUP_ALPHA, config.MIXUP_ALPHA))
+                    partner_coords = self.coords_cache[self.filenames[partner_idx]]
+                    coords = (α * coords + (1.0 - α) * partner_coords).astype(coords.dtype)
+                    rating_val = α * rating_val + (1.0 - α) * float(self.ratings[partner_idx])
+                    partner_pseudo = self.pseudo_labels.get(
+                        self.filenames[partner_idx], {}
+                    )
+                    partner_arr = np.array(
+                        [partner_pseudo.get(o, 3.0) for o in ORGAN_ORDER],
+                        dtype=np.float32,
+                    )
+                    pseudo_arr = α * pseudo_arr + (1.0 - α) * partner_arr
+                    weight_val = α * weight_val + (1.0 - α) * float(
+                        self._rating_weights[partner_idx]
+                    )
 
         # Landmark jitter: tiny Gaussian noise per call → minority faces
         # resampled by WeightedRandomSampler see slightly different geometry
@@ -129,20 +212,13 @@ class FaceDataset(Dataset):
         else:
             subgraphs = build_all_subgraphs(coords, self.avg_face)  # dict[str, DGLGraph]
 
-        rating = torch.tensor(self.ratings[idx], dtype=torch.float32)
-
-        pseudo = self.pseudo_labels.get(fname, {})
-        pseudo_tensor = torch.tensor(
-            [pseudo.get(o, 3.0) for o in ORGAN_ORDER],
-            dtype=torch.float32,
-        )  # shape (5,)
-
         return {
             "filename": fname,
             "subgraphs": subgraphs,          # dict[str, DGLGraph]
-            "rating": rating,                # scalar
-            "pseudo_scores": pseudo_tensor,  # (5,)
+            "rating": torch.tensor(rating_val, dtype=torch.float32),
+            "pseudo_scores": torch.from_numpy(pseudo_arr),           # (5,)
             "ethnicity": self.ethnicities[idx],
+            "rating_weight": torch.tensor(weight_val, dtype=torch.float32),
         }
 
 
@@ -168,12 +244,64 @@ class PairDataset(Dataset):
         self,
         face_dataset: FaceDataset,
         pairs_per_sample: int = config.PAIRS_PER_SAMPLE,
+        hard_pair_sampling: bool = False,
     ) -> None:
         self.ds = face_dataset
         self.pairs_per_sample = pairs_per_sample
+        self.hard_pair_sampling = hard_pair_sampling
+
+        # Precompute bucket→indices map once for Hard Pair Sampling
+        bucket_edges = config.MIXUP_BUCKET_EDGES
+        self._bucket_indices: dict[int, list[int]] = {}
+        for i, r in enumerate(self.ds.ratings):
+            b = _bucket_of(r, bucket_edges)
+            self._bucket_indices.setdefault(b, []).append(i)
 
         # Pre-build list of valid (A_idx, B_idx) pairs
         self._pairs: list[tuple[int, int]] = self._build_pairs()
+
+    def _sample_candidates(
+        self,
+        a_idx: int,
+        n: int,
+        k: int,
+    ) -> list[int]:
+        """
+        Choose candidate partner indices for anchor a_idx.
+
+        With Hard Pair Sampling enabled, sample more heavily from rating
+        buckets that are FAR from the anchor's bucket. With random pairing
+        (default) the chance of seeing a Jelek↔Cantik pair is ~0.5 %; HPS
+        boosts this dramatically so L_rank actually learns extreme contrasts.
+        """
+        if not self.hard_pair_sampling:
+            return random.sample(
+                [i for i in range(n) if i != a_idx],
+                k=min(k, n - 1),
+            )
+
+        edges = config.MIXUP_BUCKET_EDGES
+        b_a = _bucket_of(self.ds.ratings[a_idx], edges)
+
+        # Stratified pool: more slots for distant buckets
+        candidates: list[int] = []
+        for b, members in self._bucket_indices.items():
+            if not members:
+                continue
+            # Distance 0 → small quota; large distance → large quota.
+            distance = abs(b - b_a)
+            weight = distance + 1  # 1, 2, 3, 4 for distances 0..3
+            quota = max(1, int(round(k * weight / 10)))
+            pool = [i for i in members if i != a_idx]
+            if not pool:
+                continue
+            quota = min(quota, len(pool))
+            candidates.extend(random.sample(pool, k=quota))
+
+        if len(candidates) > k:
+            random.shuffle(candidates)
+            candidates = candidates[:k]
+        return candidates
 
     def _build_pairs(self) -> list[tuple[int, int]]:
         n = len(self.ds)
@@ -185,10 +313,8 @@ class PairDataset(Dataset):
             if not pseudo_a:
                 continue
 
-            # Sample candidates
-            candidates = random.sample(
-                [i for i in indices if i != a_idx],
-                k=min(self.pairs_per_sample * 10, n - 1),
+            candidates = self._sample_candidates(
+                a_idx, n=n, k=self.pairs_per_sample * 10
             )
 
             rating_a = self.ds.ratings[a_idx]
@@ -259,6 +385,9 @@ def collate_faces(
         "ratings": torch.stack([item["rating"] for item in batch]),
         "pseudo_scores": torch.stack([item["pseudo_scores"] for item in batch]),
         "ethnicities": [item["ethnicity"] for item in batch],
+        "rating_weights": torch.stack([
+            item.get("rating_weight", torch.tensor(1.0)) for item in batch
+        ]),
     }
 
 
