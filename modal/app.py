@@ -118,6 +118,7 @@ def train_remote(
     lr: float = 1e-3,
     weight_decay: float = 1e-4,
     resume: bool = True,
+    use_augmented_train: bool = True,
 ) -> dict:
     import sys
 
@@ -133,15 +134,37 @@ def train_remote(
     config.PSEUDO_LABEL_CACHE      = Path(CACHE_DIR) / "pseudo_labels.pkl"
     config.CHECKPOINT_PATH         = Path(CKPT_DIR)  / "checkpoint_best.pt"
 
+    # Switch the training set + landmark cache between original and
+    # pseudo-label-time MixUp augmented bundles. Test set always stays clean.
+    aug_csv   = Path(DATA_DIR)  / "aug_train_labels.csv"
+    aug_cache = Path(CACHE_DIR) / "aug_train_landmarks.pkl"
+    if use_augmented_train and aug_csv.exists() and aug_cache.exists():
+        train_csv            = str(aug_csv)
+        landmark_cache_train = str(aug_cache)
+        dataset_tag = "synthaug (real + synthetic tail)"
+    else:
+        if use_augmented_train:
+            print("⚠ augmented files missing — falling back to original cache.")
+        train_csv            = str(Path(DATA_DIR)  / "train_labels.csv")
+        landmark_cache_train = str(config.LANDMARK_CACHE_TRAIN)
+        dataset_tag = "original (no synthaug)"
+
     # Log active config so Modal dashboard shows what's running.
     print("=" * 60)
     print("FaceRankNet — Modal A100 training")
+    print(f"  dataset       : {dataset_tag}")
+    print(f"  train CSV     : {train_csv}")
+    print(f"  train cache   : {landmark_cache_train}")
+    print(f"  pseudo-labels : {config.PSEUDO_LABEL_CACHE}")
     print(f"  epochs        : {num_epochs}")
     print(f"  batch_size    : {batch_size}")
     print(f"  lr            : {lr}")
-    print(f"  GRADNORM_ALPHA: {config.GRADNORM_ALPHA}  (0.5 = gentle rebalance)")
-    print(f"  AUGMENT_JITTER: {config.AUGMENT_JITTER}  std={config.JITTER_STD}")
-    print(f"  WEIGHTED_SAMPLER: {config.USE_WEIGHTED_PAIR_SAMPLER}")
+    print(f"  GRADNORM_ALPHA       : {config.GRADNORM_ALPHA}")
+    print(f"  AUGMENT_JITTER       : {config.AUGMENT_JITTER}  std={config.JITTER_STD}")
+    print(f"  USE_WEIGHTED_PAIR    : {config.USE_WEIGHTED_PAIR_SAMPLER}")
+    print(f"  USE_INVERSE_FREQ_REG : {config.USE_INVERSE_FREQ_L_REG}  (LDS)")
+    print(f"  USE_HARD_PAIR_SAMPL  : {config.USE_HARD_PAIR_SAMPLING}  (HPS)")
+    print(f"  USE_WITHIN_BUCKET_MIX: {config.USE_WITHIN_BUCKET_MIXUP}  (Paradigma A)")
     print(f"  resume        : {resume}")
     print(f"  checkpoint    : {config.CHECKPOINT_PATH}")
     ckpt_exists = config.CHECKPOINT_PATH.exists()
@@ -158,9 +181,9 @@ def train_remote(
     from train import train as train_fn  # noqa: E402
 
     train_fn(
-        train_csv=str(Path(DATA_DIR) / "train_labels.csv"),
+        train_csv=train_csv,
         test_csv=str(Path(DATA_DIR) / "test_labels.csv"),
-        landmark_cache_train=str(config.LANDMARK_CACHE_TRAIN),
+        landmark_cache_train=landmark_cache_train,
         landmark_cache_test=str(config.LANDMARK_CACHE_TEST),
         pseudo_labels_path=str(config.PSEUDO_LABEL_CACHE),
         avg_face_path=str(config.AVG_FACE_CACHE),
@@ -219,12 +242,14 @@ def main(
     lr: float = 1e-3,
     weight_decay: float = 1e-4,
     resume: bool = True,
+    use_augmented_train: bool = True,
     download: bool = False,
     download_to: str = "checkpoint_best.pt",
 ):
     print(
         f"Submitting training job — "
-        f"epochs={epochs}, batch_size={batch_size}, lr={lr}, resume={resume}"
+        f"epochs={epochs}, batch_size={batch_size}, lr={lr}, "
+        f"resume={resume}, augmented={use_augmented_train}"
     )
     result = train_remote.remote(
         num_epochs=epochs,
@@ -232,11 +257,12 @@ def main(
         lr=lr,
         weight_decay=weight_decay,
         resume=resume,
+        use_augmented_train=use_augmented_train,
     )
     print("Training complete:")
     print(f"  best PCC : {result['best_pcc']:.4f}")
     print(f"  best epoch: {result['best_epoch']}")
-    print(f"  checkpoint: {result['checkpoint_path']}  (in volume 'frn-checkpoints')")
+    print(f"  checkpoint: {result['checkpoint']}  (in volume 'frn-checkpoints')")
 
     if download:
         print(f"Downloading checkpoint → {download_to} ...")
