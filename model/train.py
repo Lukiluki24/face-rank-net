@@ -30,6 +30,7 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.optim as optim
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from tqdm import tqdm
 
 import config
@@ -163,6 +164,9 @@ def train(
 
     # ---- Optimiser (task parameters only; GradNorm handles λ separately) ----
     optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+
+    # ---- LR Scheduler: Untuk memecah plateau (Saran: patience=3 atau 4) ----
+    scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=3, verbose=True) 
 
     # ---- GradNorm ----
     gradnorm = GradNorm(model, num_tasks=config.NUM_TASKS, alpha=config.GRADNORM_ALPHA)
@@ -335,6 +339,8 @@ def train(
         mae = metrics["mae"]
         dpd = metrics["dpd"]
 
+        scheduler.step(pcc)
+        
         epoch_summary = (
             f"Epoch {epoch:3d}/{num_epochs} | "
             f"loss={avg_loss:.4f} | "
