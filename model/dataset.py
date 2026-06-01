@@ -26,7 +26,7 @@ import dgl
 import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
 import config
 from organ_indices import ORGAN_INDICES
@@ -66,6 +66,8 @@ class FaceDataset(Dataset):
         pseudo_labels: dict[str, dict[str, float]] | None = None,
         avg_face: np.ndarray | None = None,
         augment_flip: bool = False,
+        augment_jitter: bool = False,
+        jitter_std: float = config.JITTER_STD,
     ) -> None:
         df = pd.read_csv(csv_path)
 
@@ -104,6 +106,8 @@ class FaceDataset(Dataset):
         self.coords_cache = coords_cache
         self.pseudo_labels = pseudo_labels or {}
         self.avg_face = avg_face  # None → 3-dim features; provided → 6-dim
+        self.augment_jitter = augment_jitter
+        self.jitter_std = jitter_std
 
     def __len__(self) -> int:
         return len(self.filenames)
@@ -111,6 +115,15 @@ class FaceDataset(Dataset):
     def __getitem__(self, idx: int) -> dict:
         fname = self.filenames[idx]
         coords = self.coords_cache[fname]                            # (468, 3)
+
+        # Landmark jitter: tiny Gaussian noise per call → minority faces
+        # resampled by WeightedRandomSampler see slightly different geometry
+        # each time, preventing overfitting to a small unique set.
+        if self.augment_jitter and self.jitter_std > 0:
+            coords = coords + np.random.normal(
+                0.0, self.jitter_std, size=coords.shape
+            ).astype(coords.dtype)
+
         if self._is_flipped[idx]:
             subgraphs = build_all_subgraphs_flipped(coords, self.avg_face)
         else:
@@ -215,7 +228,10 @@ class PairDataset(Dataset):
 
         pseudo_a = sample_a["pseudo_scores"]   # (5,)
         pseudo_b = sample_b["pseudo_scores"]   # (5,)
-        organ_mask = (pseudo_a > pseudo_b)     # bool tensor (5,)
+        # Confidence margin: pseudo-labels are noisy (ρ≈0.57); ignore organs
+        # where the gap is below the noise floor so L_rank trains only on
+        # high-confidence orderings.
+        organ_mask = (pseudo_a - pseudo_b) > config.RANK_PSEUDO_MARGIN
 
         return sample_a, sample_b, organ_mask
 
@@ -284,6 +300,77 @@ def make_pair_loader(
         pair_dataset,
         batch_size=batch_size,
         shuffle=shuffle,
+        num_workers=config.NUM_WORKERS,
+        pin_memory=config.PIN_MEMORY,
+        collate_fn=collate_pairs,
+    )
+
+
+def _bucket_of(rating: float, edges: tuple[float, ...] = (2.0, 3.0, 4.0)) -> int:
+    """Map a rating to a discrete bucket index (0..len(edges))."""
+    b = 0
+    for e in edges:
+        if rating >= e:
+            b += 1
+    return b
+
+
+def make_weighted_pair_loader(
+    pair_dataset: PairDataset,
+    batch_size: int = config.BATCH_SIZE,
+    bucket_edges: tuple[float, ...] = (2.0, 3.0, 4.0),
+    smoothing: str = "sqrt",
+) -> DataLoader:
+    """
+    Pair loader with WeightedRandomSampler that rebalances anchor (face A)
+    rating buckets.
+
+    SCUT-FBP5500 is heavily imbalanced:
+        Jelek (<2)  ~ 4.7%  (~188 unique)  ←  rare extremes
+        2–3         ~55%
+        3–4         ~29%
+        Cantik (>4) ~11%    (~482 unique)  ←  rare extremes
+
+    Smoothing modes
+    ---------------
+    "inverse" — weight ∝ 1 / count   (strong rebalance; ~13× boost on Jelek)
+                  Risk: overfits minority class when unique count < ~200.
+    "sqrt"    — weight ∝ 1 / √count  (moderate rebalance; ~3.6× boost on Jelek)
+                  Recommended default — keeps minority signal up without
+                  forcing the model to re-see the same 188 faces too often.
+
+    Notes
+    -----
+    Pair list is precomputed in PairDataset; the sampler picks pair indices
+    (not face indices), so this rebalances the **distribution of pairs seen
+    per epoch** without altering the H2-validated pair pool itself.
+    """
+    ratings = pair_dataset.ds.ratings
+    pair_buckets = np.array(
+        [_bucket_of(ratings[a_idx], bucket_edges) for (a_idx, _) in pair_dataset._pairs],
+        dtype=np.int64,
+    )
+    n_buckets = len(bucket_edges) + 1
+    counts = np.bincount(pair_buckets, minlength=n_buckets).astype(np.float64)
+    safe = np.maximum(counts, 1.0)
+    if smoothing == "inverse":
+        inv = 1.0 / safe
+    elif smoothing == "sqrt":
+        inv = 1.0 / np.sqrt(safe)
+    else:
+        raise ValueError(f"Unknown smoothing mode: {smoothing!r}")
+    weights = inv[pair_buckets]
+
+    sampler = WeightedRandomSampler(
+        weights=torch.from_numpy(weights).double(),
+        num_samples=len(weights),
+        replacement=True,
+    )
+
+    return DataLoader(
+        pair_dataset,
+        batch_size=batch_size,
+        sampler=sampler,
         num_workers=config.NUM_WORKERS,
         pin_memory=config.PIN_MEMORY,
         collate_fn=collate_pairs,

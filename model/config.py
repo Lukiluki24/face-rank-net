@@ -71,7 +71,7 @@ SCORE_MAX: float = 5.0
 # ---------------------------------------------------------------------------
 # GradNorm (Chen et al. 2018)
 # ---------------------------------------------------------------------------
-GRADNORM_ALPHA: float = 1.5
+GRADNORM_ALPHA: float = 0.5
 NUM_TASKS: int = 2                  # L_reg, L_rank  (L_div handled separately)
 LDIV_WEIGHT: float = 0.01           # Fixed weight for diversity regularisation
 
@@ -95,6 +95,46 @@ PIN_MEMORY: bool = False  # pin_memory only benefits when num_workers > 0
 # ---------------------------------------------------------------------------
 # Number of negative pairs per anchor in the ranking DataLoader
 PAIRS_PER_SAMPLE: int = 3
+
+# ---------------------------------------------------------------------------
+# Imbalance handling (Step 1 — class-balanced sampling + landmark jitter)
+# ---------------------------------------------------------------------------
+# Enable WeightedRandomSampler for pair_loader → rebalances anchor rating
+# buckets so extreme (jelek/cantik) faces appear ~4× more per epoch.
+USE_WEIGHTED_PAIR_SAMPLER: bool = True
+
+# Bucket edges used by the sampler (creates 4 buckets: <2, 2–3, 3–4, >4).
+PAIR_SAMPLER_BUCKET_EDGES: tuple[float, ...] = (2.0, 3.0, 4.0)
+
+# Sampler smoothing: "sqrt" (default, moderate boost ~3.6× for Jelek)
+# or "inverse" (aggressive, ~13× boost — overfits when unique count < ~200).
+PAIR_SAMPLER_SMOOTHING: str = "sqrt"
+
+# ---------------------------------------------------------------------------
+# L_rank tuning
+# ---------------------------------------------------------------------------
+# Number of epochs L_rank is frozen (gradient = 0) so L_reg establishes a
+# stable regression baseline first. After this epoch L_rank activates AND
+# GradNorm L0 is recaptured (otherwise L0 = 1e-8 from frozen state corrupts
+# the loss ratio → GradNorm balancing is broken for the rest of training).
+RANK_FREEZE_EPOCHS: int = 10
+
+# Linear ramp-up duration AFTER freeze ends. L_rank scale goes 0 → 1 over
+# this many epochs to avoid gradient shock. L0 is reset at the end of warmup
+# when L_rank reaches its final magnitude.
+RANK_WARMUP_EPOCHS: int = 10
+
+# Pseudo-label margin filter — only train L_rank on organ pairs where the
+# pseudo-score gap is *confident* (above noise floor). Setting > 0 drops
+# noisy near-tie pairs, leaving only high-confidence orderings for ranking.
+# Recommended 0.2-0.4 given pseudo-label Spearman ρ ≈ 0.57.
+RANK_PSEUDO_MARGIN: float = 0.3
+
+# Landmark jitter — small Gaussian noise added to (x, y, z) on each
+# __getitem__ call. After centroid-normalization landmark coords typically
+# fall in ~[-1, 1], so σ=0.003 ≈ 0.3% noise (well below MediaPipe error).
+AUGMENT_JITTER: bool = True
+JITTER_STD: float = 0.003
 
 # ---------------------------------------------------------------------------
 # Logging / display

@@ -4,15 +4,29 @@ app.py — Modal deployment for FaceRankNet training.
 Replaces Colab Cell 8: runs `train.train()` on a Modal A100 with the dataset
 and pre-computed caches mounted from persistent Modal Volumes.
 
-Local entrypoint:
-    modal run modal/app.py                       # default 50 epochs
-    modal run modal/app.py --epochs 80           # override epoch count
-    modal run modal/app.py --no-resume           # ignore existing checkpoint
+Typical workflow
+----------------
+1. Upload caches + checkpoint from Colab:
+       python modal/upload_cache.py --checkpoint modal/checkpoint_best.pt
 
-Detached (long jobs survive client disconnect):
-    modal run --detach modal/app.py
+2. Run training (resumes from uploaded checkpoint):
+       modal run modal/app.py
 
-Before the first run, populate the volumes via `modal/upload_cache.py`.
+3. For long runs that survive client disconnect:
+       modal run --detach modal/app.py
+
+4. Download best checkpoint after training:
+       modal run modal/app.py --download
+
+CLI flags
+---------
+    --epochs INT        Total epochs (default 50)
+    --batch-size INT    Batch size (default 32; A100 can handle 64+)
+    --lr FLOAT          Learning rate (default 1e-3)
+    --weight-decay FLOAT
+    --no-resume         Force training from scratch (ignore checkpoint)
+    --download          Download checkpoint_best.pt after training finishes
+    --download-to PATH  Local path for downloaded checkpoint (default: checkpoint_best.pt)
 """
 
 from __future__ import annotations
@@ -113,11 +127,33 @@ def train_remote(
 
     # Patch config paths to point at the mounted volumes BEFORE importing train,
     # because train.py reads several config constants at import time.
-    config.AVG_FACE_CACHE = Path(CACHE_DIR) / "avg_face.npy"
-    config.LANDMARK_CACHE_TRAIN = Path(CACHE_DIR) / "train_landmarks.pkl"
-    config.LANDMARK_CACHE_TEST = Path(CACHE_DIR) / "test_landmarks.pkl"
-    config.PSEUDO_LABEL_CACHE = Path(CACHE_DIR) / "pseudo_labels.pkl"
-    config.CHECKPOINT_PATH = Path(CKPT_DIR) / "checkpoint_best.pt"
+    config.AVG_FACE_CACHE          = Path(CACHE_DIR) / "avg_face.npy"
+    config.LANDMARK_CACHE_TRAIN    = Path(CACHE_DIR) / "train_landmarks.pkl"
+    config.LANDMARK_CACHE_TEST     = Path(CACHE_DIR) / "test_landmarks.pkl"
+    config.PSEUDO_LABEL_CACHE      = Path(CACHE_DIR) / "pseudo_labels.pkl"
+    config.CHECKPOINT_PATH         = Path(CKPT_DIR)  / "checkpoint_best.pt"
+
+    # Log active config so Modal dashboard shows what's running.
+    print("=" * 60)
+    print("FaceRankNet — Modal A100 training")
+    print(f"  epochs        : {num_epochs}")
+    print(f"  batch_size    : {batch_size}")
+    print(f"  lr            : {lr}")
+    print(f"  GRADNORM_ALPHA: {config.GRADNORM_ALPHA}  (0.5 = gentle rebalance)")
+    print(f"  AUGMENT_JITTER: {config.AUGMENT_JITTER}  std={config.JITTER_STD}")
+    print(f"  WEIGHTED_SAMPLER: {config.USE_WEIGHTED_PAIR_SAMPLER}")
+    print(f"  resume        : {resume}")
+    print(f"  checkpoint    : {config.CHECKPOINT_PATH}")
+    ckpt_exists = config.CHECKPOINT_PATH.exists()
+    if ckpt_exists:
+        import torch
+        ckpt_meta = torch.load(config.CHECKPOINT_PATH, map_location="cpu")
+        print(f"  → resuming from epoch {ckpt_meta['epoch']}, "
+              f"best_pcc={ckpt_meta['best_pcc']:.4f}, "
+              f"lambdas={[round(l, 3) for l in ckpt_meta.get('lambdas', [])]}")
+    else:
+        print("  → no checkpoint found, starting from scratch")
+    print("=" * 60)
 
     from train import train as train_fn  # noqa: E402
 
@@ -142,11 +178,15 @@ def train_remote(
     import torch
 
     ckpt = torch.load(config.CHECKPOINT_PATH, map_location="cpu")
-    return {
-        "best_pcc": float(ckpt["best_pcc"]),
+    result = {
+        "best_pcc":   float(ckpt["best_pcc"]),
         "best_epoch": int(ckpt["epoch"]),
-        "checkpoint_path": str(config.CHECKPOINT_PATH),
+        "checkpoint": str(config.CHECKPOINT_PATH),
     }
+    print("\n" + "=" * 60)
+    print(f"Training done — best PCC={result['best_pcc']:.4f} at epoch {result['best_epoch']}")
+    print("=" * 60)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -155,6 +195,18 @@ def train_remote(
 @app.function(volumes={CKPT_DIR: ckpt_vol})
 def fetch_checkpoint() -> bytes:
     return (Path(CKPT_DIR) / "checkpoint_best.pt").read_bytes()
+
+
+# ---------------------------------------------------------------------------
+# Graceful stop: create STOP file in checkpoint volume
+# Run from a second terminal: modal run modal/app.py::stop_training
+# ---------------------------------------------------------------------------
+@app.function(volumes={CKPT_DIR: ckpt_vol})
+def stop_training() -> str:
+    stop_path = Path(CKPT_DIR) / "STOP"
+    stop_path.touch()
+    ckpt_vol.commit()
+    return f"STOP file created at {stop_path} — training will halt after current epoch."
 
 
 # ---------------------------------------------------------------------------

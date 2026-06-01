@@ -33,7 +33,13 @@ import torch.optim as optim
 from tqdm import tqdm
 
 import config
-from dataset import FaceDataset, PairDataset, make_face_loader, make_pair_loader
+from dataset import (
+    FaceDataset,
+    PairDataset,
+    make_face_loader,
+    make_pair_loader,
+    make_weighted_pair_loader,
+)
 from evaluate import run_full_evaluation, validate_local_scores
 from loss import GradNorm, l_div, l_rank, l_reg
 from model import FaceRankNet
@@ -123,7 +129,13 @@ def train(
     avg_face = load_avg_face(avg_face_path)
 
     # ---- Datasets ----
-    train_face_ds = FaceDataset(train_csv, coords_train, pseudo_labels, avg_face=avg_face)
+    # Step 1: enable landmark jitter on train set only.  Combined with the
+    # WeightedRandomSampler below, this gives minority-class faces fresh
+    # geometric variation each time they are resampled.
+    train_face_ds = FaceDataset(
+        train_csv, coords_train, pseudo_labels, avg_face=avg_face,
+        augment_jitter=config.AUGMENT_JITTER,
+    )
     test_face_ds  = FaceDataset(test_csv,  coords_test,  avg_face=avg_face)
 
     pair_ds = PairDataset(train_face_ds)
@@ -196,18 +208,49 @@ def train(
                 checkpoint_path,
             )
 
+    # ---- Graceful stop: create a file named "STOP" to halt after current epoch ----
+    stop_flag = Path(checkpoint_path).parent / "STOP"
+
     # ---- Epoch loop ----
+    # Reset GradNorm L0 at the first epoch where L_rank reaches full magnitude
+    # (after freeze + warmup). Without this, L0_rank stays clamped at 1e-8
+    # (captured while L_rank was scaled to zero) and the loss ratio explodes,
+    # corrupting GradNorm's task balancing for the rest of training.
+    rank_l0_reset_epoch = config.RANK_FREEZE_EPOCHS + config.RANK_WARMUP_EPOCHS + 1
+
     for epoch in range(start_epoch, num_epochs + 1):
+        if stop_flag.exists():
+            logger.info("STOP file detected — halting training after epoch %d.", epoch - 1)
+            stop_flag.unlink()
+            break
+
+        if epoch == rank_l0_reset_epoch:
+            gradnorm.reset_L0()
+            logger.info(
+                "  ↻ GradNorm L0 reset at epoch %d (L_rank now at full scale).",
+                epoch,
+            )
+
         # Resample pairs every epoch so the model sees different (A, B)
         # combinations and doesn't overfit to a fixed set of pair orderings.
         pair_ds._pairs = pair_ds._build_pairs()
-        pair_loader = make_pair_loader(pair_ds, shuffle=True, batch_size=batch_size)
+        if config.USE_WEIGHTED_PAIR_SAMPLER:
+            # Step 1: rebalance anchor rating bucket each epoch (extreme
+            # faces appear ~4× more often → cures regression-to-mean).
+            pair_loader = make_weighted_pair_loader(
+                pair_ds, batch_size=batch_size,
+                bucket_edges=config.PAIR_SAMPLER_BUCKET_EDGES,
+                smoothing=config.PAIR_SAMPLER_SMOOTHING,
+            )
+        else:
+            pair_loader = make_pair_loader(pair_ds, shuffle=True, batch_size=batch_size)
 
         model.train()
         total_loss_accum = 0.0
         n_batches = 0
 
-        pbar = tqdm(pair_loader, desc=f"Epoch {epoch}/{num_epochs}", unit="batch")
+        pbar = tqdm(pair_loader, desc=f"Epoch {epoch}/{num_epochs}", unit="batch",
+                    miniters=50, mininterval=30, dynamic_ncols=False)
         for batch_a, batch_b, organ_mask in pbar:
             # Move to device
             sg_a = {k: v.to(device) for k, v in batch_a["subgraphs"].items()}
@@ -234,12 +277,17 @@ def train(
             loss_rank = l_rank(local_a, local_b, organ_mask)
             loss_div  = l_div(local_a)
 
-            # A1: freeze L_rank first 10 epochs so L_reg establishes a stable
-            # regression baseline before noisy pseudo-labels start competing.
-            if epoch <= 10:
-                losses = [loss_reg, torch.zeros_like(loss_rank)]
+            # A1: L_rank warmup — freeze for RANK_FREEZE_EPOCHS, then linearly
+            # ramp 0→1 over RANK_WARMUP_EPOCHS. Hard on/off would shock GradNorm.
+            freeze_end = config.RANK_FREEZE_EPOCHS
+            warmup_end = freeze_end + config.RANK_WARMUP_EPOCHS
+            if epoch <= freeze_end:
+                rank_scale = 0.0
+            elif epoch <= warmup_end:
+                rank_scale = (epoch - freeze_end) / config.RANK_WARMUP_EPOCHS
             else:
-                losses = [loss_reg, loss_rank]
+                rank_scale = 1.0
+            losses = [loss_reg, rank_scale * loss_rank]
 
             # L_div is negative (−Var) so it must NOT enter GradNorm,
             # which only handles positive losses. Add it with a fixed weight.

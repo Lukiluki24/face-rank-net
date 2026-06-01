@@ -178,6 +178,18 @@ class GradNorm:
             model.fusion_weights.unsqueeze(0)  # wrap so it looks like a param list
         ) if False else self._get_shared_params(model)
 
+    def reset_L0(self) -> None:
+        """
+        Force L0 to be re-captured on the next ``update()`` call.
+
+        Call this when a previously-frozen task (e.g. L_rank held at zero
+        for the first N epochs) starts contributing real gradients. Without
+        reset, the frozen-state L0 (≈1e-8 after clamping) makes the loss
+        ratio l_current / L0 explode, corrupting GradNorm's weight balancing
+        for the rest of training.
+        """
+        self.L0 = None
+
     @staticmethod
     def _get_shared_params(model: nn.Module) -> list[nn.Parameter]:
         """Return params that receive gradients from all tasks.
