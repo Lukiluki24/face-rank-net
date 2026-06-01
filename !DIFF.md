@@ -1,190 +1,171 @@
 # !DIFF — Paper vs Code: FaceRankNet
 
-Dokumen ini mencatat **semua perbedaan antara klaim di paper (`FaceRankNet_Paper.md`) dan implementasi aktual di codebase**. Digunakan sebagai referensi sebelum submission — bagian yang berbeda perlu diperbarui di paper atau justified sebagai improvement yang disengaja.
+Dokumen ini mencatat **perbedaan antara klaim di paper (`FaceRankNet_Paper.md`) dan implementasi aktual di codebase**. Tiap entri menunjuk klausa paper yang spesifik + lokasi kode terkait. Digunakan sebagai checklist revisi paper sebelum submission.
+
+> Diff yang sudah tidak relevan (sudah disinkronkan, atau hanya kode eksperimen di luar pipeline utama, atau hal di luar klaim paper) telah dihapus dari versi sebelumnya.
 
 ---
 
-## DIFF 1 — Node Feature Dimension
+## DIFF 1 — Node Feature Dimension (3 → 6)
 
 | | Detail |
 |--|--------|
-| **Paper** (§III.B, §III.C.1) | `F ∈ ℝ^{468×3}` — hanya koordinat `(x, y, z)`. "Each node's normalized coordinates are projected..." |
-| **Code** ([config.py:46](model/config.py#L46), [preprocessing.py:237](model/preprocessing.py#L237)) | `NODE_FEAT_DIM = 6` — `(x, y, z, Δx, Δy, Δz)`. Deviasi dari reference face langsung dimasukkan ke node feature. |
-| **Impact** | `Linear(3→64)` di paper vs `Linear(6→64)` di code. Model yang dilatih tidak kompatibel dengan deskripsi paper. |
-| **Aksi** | Update paper §III.B dan §III.C.1: tambahkan deskripsi 6-dim node feature dan motivasinya (averageness signal eksplisit di input level). |
+| **Paper** §III.B.2, §III.C.1 | "Each face is represented as a matrix $F \in \mathbb{R}^{468 \times 3}$." dan "Each node's normalized coordinates are projected into a higher-dimensional embedding space" — input GAT = 3-dim. |
+| **Code** [config.py:46](model/config.py#L46), [preprocessing.py:237](model/preprocessing.py#L237) | `NODE_FEAT_DIM = 6` — `(x, y, z, Δx, Δy, Δz)`. Saat `avg_face` diberikan, fitur node digabung dengan deviasi terhadap reference face. `Linear(6→64)`. |
+| **Aksi paper** | §III.B.2 / §III.C.1: ganti $F \in \mathbb{R}^{468 \times 3}$ menjadi $\mathbb{R}^{468 \times 6}$. Tambahkan kalimat: "Each node feature concatenates its normalized coordinates with the per-landmark deviation $\Delta = p_i - \mu_i$ from the reference face, making the Averageness signal explicit at the input level rather than requiring the GAT to infer it from absolute coordinates alone." |
 
 ---
 
-## DIFF 2 — Formula Pseudo-Label: MSE + Linear vs RMSE + Percentile
+## DIFF 2 — Pseudo-Label Formulation: Proximity-to-Mean (MSE+Linear) → Beauty-Axis Projection + Percentile Rank
 
 | | Detail |
 |--|--------|
-| **Paper** (§III.D.1) | Menggunakan **MSE** (squared): $MSE = \frac{1}{N}\sum\|p_i - \mu_i\|^2$. Normalisasi linear: $\hat{y}^{psc} = 5 - 4 \cdot \frac{MSE}{\max(MSE)}$ |
-| **Code** ([pseudo_labels.py:104](model/pseudo_labels.py#L104), [pseudo_labels.py:368](model/pseudo_labels.py#L368)) | Menggunakan **RMSE** (square root). Normalisasi **percentile rank**: `rank = bisect_left(sorted_mse, mse) / n` → `score = clip(5 − 4·rank, 1, 5)` |
-| **Mengapa berbeda** | Linear normalization terhadap `max_MSE` menyebabkan score compression (mean 3.7–4.5, hampir semua wajah terlihat cantik). Percentile rank menghasilkan distribusi uniform di [1,5], meningkatkan discriminative power. RMSE dipakai untuk konsistensi satuan antar organ. |
-| **Aksi** | Update paper §III.D.1: (1) ganti MSE → RMSE, (2) ganti formula linear → percentile rank, (3) tambahkan motivasi: "menghindari efek kompresi akibat outlier tunggal." |
+| **Paper** §III.D.1 | $MSE_{organ} = \frac{1}{N}\|p_i - \mu_i\|^2$. Normalisasi linear: $\hat{y}^{psc} = 5 - 4 \cdot \frac{MSE}{\max(MSE)}$. Skor naik ketika face **dekat ke mean** (proximity-to-prototype). |
+| **Code** [pseudo_labels.py:188](model/pseudo_labels.py#L188), [pseudo_labels.py:217](model/pseudo_labels.py#L217), [pseudo_labels.py:386](model/pseudo_labels.py#L386); [run_colab.ipynb Cell 5](model/run_colab.ipynb) | **Beauty-axis projection**, bukan RMSE/jarak. (1) `beauty_axis = beauty_prototype − population_mean`. (2) Untuk tiap organ: `proj = (coord_organ − μ_organ) · axis_organ / ‖axis_organ‖`. (3) **Percentile rank** atas proyeksi: `rank = bisect_left(sorted_proj, proj) / n` → `score = clip(1 + 4·rank, 1, 5)`. Direction: **higher projection along the beauty axis → higher score** (bukan "lower distance"). |
+| **Mengapa berbeda** | Said & Todorov (2011) + DeBruine & Jones (2007): attractiveness adalah **arah** di face space, bukan proximity ke satu titik tunggal. Wajah cantik yang ter-caricature ("hyper-beautiful") secara matematis lebih jauh dari mean tapi tetap dipersepsi lebih cantik — karena posisinya **searah** dengan beauty axis, bukan dekat dengan prototype. Diagnosa awal versi MSE-to-mean: Spearman ρ negatif (sekitar −0.13). Versi beauty-axis projection: Spearman ρ ~0.57. Linear/$\max$ juga menyebabkan kompresi distribusi → percentile rank dipilih untuk distribusi uniform di [1, 5]. |
+| **Aksi paper** | §III.D.1 perlu rewrite substansial. Ganti formula MSE/jarak menjadi proyeksi skalar pada vektor `beauty_prototype − population_mean`. Jelaskan: (1) konstruksi beauty axis, (2) scalar projection per organ, (3) percentile rank → [1, 5]. Sitasi Said & Todorov 2011, DeBruine & Jones 2007 untuk justifikasi direction-based daripada proximity-based attractiveness. |
 
 ---
 
-## DIFF 3 — Referensi Wajah: Population Average vs Beauty Prototype
+## DIFF 3 — Reference Face: Single Population Mean → Population Mean + Beauty Prototype, Per Ethnicity
 
 | | Detail |
 |--|--------|
-| **Paper** (§III.D.1) | "Universal Average Face is constructed by computing the coordinate-wise mean of **all** 468 normalized landmarks across the **entire** training set." |
-| **Code** ([pseudo_labels.py:147](model/pseudo_labels.py#L147), [pseudo_labels.py:250](model/pseudo_labels.py#L250)) | Menggunakan **Beauty Prototype**: mean dari **top-30% wajah dengan holistic rating tertinggi**, dihitung **per etnicity** (Asian & Caucasian terpisah) lewat `compute_ethnicity_avg_faces` + `compute_beauty_prototype`. |
-| **Motivasi** | Population average mencampur wajah cantik + jelek → referensi tidak representatif. Diagnosis menunjukkan Spearman ρ = −0.13 dengan population average. Beauty prototype mengisolasi "attractive subspace" sehingga hypothesis averageness tetap valid. |
-| **Aksi** | Update paper §III.D.1 dan §III.C (Weakly Supervised Learning): deskripsikan beauty prototype sebagai "Refined Universal Average Face" dari top-k% training faces per ethnicity. Tambahkan ke §I (Introduction) sebagai bagian dari H1 refinement. |
+| **Paper** §III.D.1 | Satu reference: "Universal Average Face by computing the coordinate-wise mean of **all** 468 normalized landmarks across the **entire** training set." |
+| **Code** [pseudo_labels.py:49](model/pseudo_labels.py#L49), [pseudo_labels.py:147](model/pseudo_labels.py#L147), [pseudo_labels.py:250](model/pseudo_labels.py#L250); [run_colab.ipynb Cell 5](model/run_colab.ipynb) | **Dua reference dipakai bersama** untuk membentuk beauty axis: (1) **`population_mean`** = mean semua wajah; (2) **`beauty_prototype`** = mean dari top-30% wajah dengan rating tertinggi. Keduanya dihitung **per kelompok etnis** (Asian / Caucasian terpisah) lewat `compute_ethnicity_avg_faces` — H1 refinement. |
+| **Motivasi** | Population mean saja tidak memberi arah (hanya titik). Beauty prototype mendefinisikan endpoint dari beauty axis. Per-ethnicity menghilangkan bias bila kedua kelompok punya struktur wajah berbeda. |
+| **Aksi paper** | §I — tambahkan kontribusi: "Beauty-axis pseudo-label generation via per-ethnicity beauty prototype + population mean pair". §III.D.1 — ganti deskripsi reference: alih-alih satu Universal Average Face, jelaskan pasangan (population_mean_ethn, beauty_prototype_ethn) yang dipakai untuk mengkonstruksi beauty axis per organ. |
 
 ---
 
-## DIFF 4 — H2: Holistic Consistency Filter + Confidence Margin
+## DIFF 4 — Pair Sampling: + H2 Holistic Consistency Filter + Confidence Margin
 
 | | Detail |
 |--|--------|
-| **Paper** (§III.D.2) | Pair (A, B) dipilih berdasarkan **pseudo-score ordering** saja: jika `pseudo(A) > pseudo(B)` untuk suatu organ, model dilatih untuk memprediksi `local_score(A) > local_score(B)`. |
-| **Code** ([dataset.py:204](model/dataset.py#L204), [dataset.py:234](model/dataset.py#L234)) | Dua filter tambahan: (1) **H2**: skip pair jika `rating_a <= rating_b`. (2) **Confidence margin**: `organ_mask = (pseudo_a − pseudo_b) > RANK_PSEUDO_MARGIN` (default 0.3). Organ dengan gap di bawah noise floor di-mask 0. |
-| **Motivasi** | H2: tanpa filter, L_rank bisa dilatih untuk memenangkan ranking yang bertentangan dengan L_reg → konflik gradien → λ_rank meledak. Margin: pseudo-label noisy (ρ ≈ 0.57); gap kecil sering kebalik tanda, jadi hanya gap konfiden yang dipakai. |
-| **Aksi** | Tambahkan ke paper §III.D.2 sebagai "Consistency-Filtered Pair Sampling" + "Confidence Margin Filter". Sebutkan margin 0.3 dan justifikasinya. |
+| **Paper** §III.D.2 | "Pseudo-scores $\hat{y}^{psc}_{organ}(A)$ and $\hat{y}^{psc}_{organ}(B)$ determine the ranking direction per organ" — pair sampling hanya bergantung pada urutan pseudo-score; tidak ada filter tambahan. |
+| **Code** [dataset.py:204](model/dataset.py#L204), [dataset.py:234](model/dataset.py#L234) | **H2**: `if rating_a <= rating_b: continue` — hanya pair dengan urutan holistic konsisten yang dimasukkan. **Margin filter**: `organ_mask = (pseudo_a - pseudo_b) > RANK_PSEUDO_MARGIN` (=0.3); organ dengan gap di bawah noise floor di-mask 0 di dalam L_rank. |
+| **Motivasi** | H2: tanpa filter, L_rank bisa memenangkan urutan yang berlawanan arah dengan L_reg → konflik gradien, λ_rank meledak. Margin: pseudo-label noisy (ρ≈0.57 vs holistic); gap kecil sering kebalik tanda, jadi hanya pair konfiden yang dipakai. |
+| **Aksi paper** | §III.D.2: tambahkan sub-bagian "Consistency-Filtered Pair Sampling": (1) filter pair jika `rating(A) ≤ rating(B)`. (2) Per-organ confidence margin τ=0.3 pada gap pseudo-score. Sertakan motivasi konsistensi gradien dan noise floor. |
 
 ---
 
-## DIFF 5 — GradNorm: 3 Tasks vs 2 Tasks (+ α berbeda)
+## DIFF 5 — Hybrid Loss: GradNorm Mengelola 2 Task, L_div Fixed Weight
 
 | | Detail |
 |--|--------|
-| **Paper** (§III.D.3, §III.D.4) | Formula total loss: $\mathcal{L} = \lambda_1\mathcal{L}_{reg} + \lambda_2\mathcal{L}_{rank} + \lambda_3\mathcal{L}_{div}$ — mengimplikasikan GradNorm mengelola **ketiga** loss secara dinamis. Hyper-parameter $\alpha = 1.5$. |
-| **Code** ([config.py:74](model/config.py#L74), [train.py:296](model/train.py#L296)) | GradNorm hanya mengelola **2 task**: `[L_reg, L_rank]`. `L_div` ditambahkan dengan **bobot tetap** `LDIV_WEIGHT = 0.01` di luar GradNorm. `GRADNORM_ALPHA = 0.5` (bukan 1.5). |
-| **Mengapa berbeda** | `L_div = −Var(scores)` bernilai **negatif** — melanggar asumsi positivitas GradNorm. α=0.5 (restoring force lebih lembut) menstabilkan λ; α=1.5 menyebabkan swing besar. |
-| **Aksi** | Update paper §III.D.3: pisahkan $\mathcal{L}_{div}$ dari GradNorm. Formula baru: $\mathcal{L}_{total} = \text{GradNorm}_{\alpha=0.5}(\lambda_1\mathcal{L}_{reg}, \lambda_2\mathcal{L}_{rank}) + 0.01 \cdot \mathcal{L}_{div}$. Tambahkan kalimat: "L_div dikecualikan karena bernilai negatif, bertentangan dengan asumsi loss positif GradNorm; α dikecilkan menjadi 0.5 untuk menstabilkan λ." |
+| **Paper** §III.D.3 | $\mathcal{L}_{total} = \lambda_1\mathcal{L}_{reg} + \lambda_2\mathcal{L}_{rank} + \lambda_3\mathcal{L}_{div}$ — semua tiga loss memiliki λ. |
+| **Paper** §III.D.4 | "GradNorm dynamically recalibrates the loss weights ($\lambda_i$) at each backward pass" — mengimplikasikan GradNorm meng-update **semua** $\lambda_i$. |
+| **Code** [config.py:75](model/config.py#L75), [train.py:290](model/train.py#L290), [train.py:296-297](model/train.py#L296) | GradNorm hanya mengelola `[L_reg, L_rank]` (`NUM_TASKS = 2`). L_div ditambahkan **fixed**: `total_loss += LDIV_WEIGHT * loss_div` dengan `LDIV_WEIGHT = 0.01`. |
+| **Mengapa berbeda** | $L_{div} = -\text{Var}$ bernilai **negatif**. GradNorm mengasumsikan loss positif: $r_i = L_i / L_0$ tidak terdefinisi konsisten untuk loss bertanda. |
+| **Aksi paper** | §III.D.3 / §III.D.4: ubah formula menjadi $\mathcal{L}_{total} = \text{GradNorm}(\lambda_1\mathcal{L}_{reg}, \lambda_2\mathcal{L}_{rank}) + \lambda_3 \mathcal{L}_{div}$, dengan $\lambda_3 = 0.01$ (fixed). Tambahkan kalimat: "$\mathcal{L}_{div}$ is excluded from GradNorm because its negative magnitude violates GradNorm's positive-loss assumption." |
 
 ---
 
-## DIFF 6 — L_reg Menggunakan Kedua Wajah dalam Pair
+## DIFF 6 — L_reg Memanfaatkan Kedua Wajah dalam Pair
 
 | | Detail |
 |--|--------|
-| **Paper** (§III.D.3) | $\mathcal{L}_{reg} = \frac{1}{N}\sum(\hat{y}_{global} - y_{gt})^2$ — tidak dispesifikasikan apakah menggunakan satu atau dua wajah per pair. |
-| **Code** ([train.py:276](model/train.py#L276)) | `loss_reg = (l_reg(pred_a, rating_a) + l_reg(pred_b, rating_b)) / 2` — L_reg dihitung dari **kedua** wajah A dan B per batch. |
-| **Motivasi** | Menggunakan hanya face A membuang 50% ground-truth signal holistic per batch. Menggunakan A+B menggandakan sinyal regresi tanpa menambah data baru. |
-| **Aksi** | Update paper §III.D.3: tambahkan keterangan bahwa L_reg dihitung dari kedua wajah dalam setiap pair untuk memaksimalkan utilitas ground-truth label. |
+| **Paper** §III.D.3 | $\mathcal{L}_{reg} = \frac{1}{N}\sum(\hat{y}_{global} - y_{gt})^2$ — tidak dispesifikasikan apakah dari satu atau dua wajah per pair. Naturally dibaca "satu prediksi vs satu label". |
+| **Code** [train.py:276](model/train.py#L276) | `loss_reg = (l_reg(pred_a, rating_a) + l_reg(pred_b, rating_b)) / 2` — keduanya dihitung per batch. |
+| **Motivasi** | Memakai hanya face A membuang 50% ground-truth signal yang sudah tersedia di setiap batch ranking. |
+| **Aksi paper** | §III.D.3: klarifikasi formula menjadi $\mathcal{L}_{reg} = \frac{1}{2N}\sum_{x \in \{A,B\}}(\hat{y}_{global}(x) - y_{gt}(x))^2$ — menggunakan kedua anggota pair. |
 
 ---
 
-## DIFF 7 — Pair Resampling Per Epoch (Tidak Ada di Paper)
+## DIFF 7 — Pair Resampling per Epoch (Tidak Disebutkan di Paper)
 
 | | Detail |
 |--|--------|
-| **Paper** | Tidak disebutkan. |
-| **Code** ([train.py:236](model/train.py#L236)) | `pair_ds._pairs = pair_ds._build_pairs()` dipanggil di awal **setiap epoch** — pair di-resample ulang sehingga model tidak overfit pada set pasangan tetap. |
-| **Motivasi** | Pair tetap menyebabkan model menghafalkan urutan spesifik antar wajah, bukan belajar pola umum. Resampling per epoch setara dengan data augmentation untuk ranking. |
-| **Aksi** | Tambahkan ke paper §III.D.2: "Pairs are resampled at the beginning of each epoch to prevent overfitting to a fixed pair ordering." |
+| **Paper** | Tidak disebutkan. Asumsi default: pair pool tetap selama training. |
+| **Code** [train.py:236](model/train.py#L236) | `pair_ds._pairs = pair_ds._build_pairs()` dipanggil di awal setiap epoch — pair pool dibangun ulang. |
+| **Motivasi** | Pair tetap → model menghafal urutan spesifik antar wajah, bukan pola umum. Resampling = data augmentation untuk task ranking. |
+| **Aksi paper** | §III.D.2: tambahkan kalimat: "Training pairs are re-sampled at the beginning of each epoch to prevent overfitting to a fixed pair set and improve generalization." |
 
 ---
 
-## DIFF 8 — GAT Multi-Head (Tidak Dispesifikasikan di Paper)
+## DIFF 8 — GAT Multi-Head Tidak Spesifik di Paper
 
 | | Detail |
 |--|--------|
-| **Paper** (§III.C.2) | Formula GAT standar ditampilkan — tidak menyebutkan jumlah head. Terkesan single-head. |
-| **Code** ([config.py:52](model/config.py#L52), [model.py:90](model/model.py#L90)) | `GAT_NUM_HEADS = 4` — 4 parallel attention heads. Output shape `(N, 4, 64)` → flatten → `(N, 256)`. |
-| **Aksi** | Update paper §III.C.2: tambahkan "multi-head attention with K=4 heads" dan modifikasi formula menjadi multi-head: $h'_i = \|_{k=1}^{K} \sigma\left(\sum_j \alpha_{ij}^k W^k h_j\right)$ |
+| **Paper** §III.C.2 | Formula GAT tunggal: $h'_i = \sigma(\sum_j \alpha_{ij} W h_j)$ — tidak ada notasi multi-head ($K$, $\|$, dst). |
+| **Code** [config.py:52](model/config.py#L52), [model.py:90](model/model.py#L90) | `GAT_NUM_HEADS = 4`. Output `(N, 4, 64)` → flatten → `(N, 256)`. |
+| **Aksi paper** | §III.C.2: ganti formula menjadi multi-head dengan concatenation: $h'_i = \big\|_{k=1}^{K=4} \sigma(\sum_j \alpha_{ij}^k W^k h_j)$, dan tambahkan dimensi output $4 \times 64 = 256$. |
 
 ---
 
-## DIFF 9 — Sub-Graph Connectivity (Tidak Dispesifikasikan di Paper)
+## DIFF 9 — Sub-Graph Connectivity Tidak Dispesifikasikan di Paper
 
 | | Detail |
 |--|--------|
-| **Paper** | Tidak menyebutkan struktur edge dalam organ sub-graph. |
-| **Code** ([preprocessing.py:225](model/preprocessing.py#L225)) | Sub-graph dibangun sebagai **fully connected** (semua node dalam satu organ terhubung ke semua node lain) + **self-loops** via `dgl.add_self_loop`. |
-| **Aksi** | Tambahkan ke paper §III.B.3: "Each organ sub-graph is constructed as a fully-connected graph with self-loops, allowing every landmark to attend to all others within the same anatomical region." |
+| **Paper** §III.B.3 | Hanya disebut "partitioned into five anatomically defined sub-graphs" — tidak ada deskripsi struktur edge. |
+| **Code** [preprocessing.py:225-232](model/preprocessing.py#L225) | Setiap sub-graph dibangun **fully-connected** (semua ordered pair antar node organ) lalu `dgl.add_self_loop` → setiap node juga punya self-edge. |
+| **Aksi paper** | §III.B.3: tambahkan kalimat: "Each organ sub-graph is constructed as a fully-connected directed graph with self-loops, allowing every landmark within an anatomical region to attend to all others in a single GAT layer." |
 
 ---
 
-## DIFF 10 — Local Score Validity: Definisi Validasi
+## DIFF 10 — Global Score Fusion: Softmax-Weighted Sum → Cross-Organ MultiheadAttention
 
 | | Detail |
 |--|--------|
-| **Paper** (§III.E) | "Verifying that facial components geometrically **closer to the Universal Average Face** receive proportionally **higher** aesthetic scores." |
-| **Code** ([evaluate.py:116](model/evaluate.py#L116)) | Menghitung **Spearman ρ antara pseudo_scores dan predicted local_scores**. Validasi = semua 5 organ punya ρ > 0. Tidak langsung mengukur jarak ke avg face — melainkan konsistensi dengan pseudo-label. |
-| **Implikasi setelah beauty prototype** | Setelah DIFF 3 (beauty prototype), pseudo-scores: rendah RMSE dari *beauty prototype* → score tinggi. |
-| **Aksi** | Update paper §III.E: ganti "Universal Average Face" → "Beauty Prototype". Klarifikasi bahwa validasi mengukur Spearman ρ antara predicted organ scores dan pseudo-scores berbasis beauty prototype. |
+| **Paper** §III.C.5 | $\hat{y}_{global} = \sum_i \text{softmax}(w_i) \cdot \hat{y}_i$ — fusion linear dari **lima skor skalar** dengan softmax weight. |
+| **Code** [model.py:191-204](model/model.py#L191), [model.py:236-245](model/model.py#L236) | (1) Setiap OrganGAT mengembalikan `(score, pooled_embedding ∈ ℝ^256)`. (2) Embedding di-stack `(B, 5, 256)` dan dimasukkan ke `nn.MultiheadAttention(embed_dim=256, num_heads=4)`. (3) Mean-pool attended embeddings → `global_mlp(256→64→1)` → `4·sigmoid(x)+1`. `fusion_weights` masih ada **hanya** untuk interpretability (organ importance), bukan menentukan global_score. |
+| **Motivasi** | Softmax atas skor skalar membuang struktur fine-grained di embedding organ. Cross-organ attention memungkinkan global score memperhatikan proporsi antar organ (golden ratio, simetri, dll) di level representasi 256-dim, bukan hanya scalar. Attention map `(B, 5, 5)` juga visualizable untuk eksplainabilitas. |
+| **Aksi paper** | §III.C.5 perlu rewrite. Tambahkan formula MultiheadAttention pada $\{h_{organ_1}, \dots, h_{organ_5}\}$, mean-pool, MLP head ke skalar dengan scaled sigmoid. Sebut bahwa $w_i$ disimpan untuk laporan importance saja. |
 
 ---
 
-## DIFF 11 — Fusion: Softmax-Weighted vs Cross-Organ MultiheadAttention
+## DIFF 11 — L_rank Warmup (Freeze + Linear Ramp + GradNorm L0 Reset)
 
 | | Detail |
 |--|--------|
-| **Paper** (§III.C.3) | "Global score = Σ_k softmax(w_k) · local_score_k" — fusion linear lewat learnable scalar weights di atas **scalar local scores**. |
-| **Code** ([model.py:191](model/model.py#L191), [model.py:236](model/model.py#L236)) | Fusion lewat `nn.MultiheadAttention(embed_dim=256, num_heads=4)` di atas **organ embeddings** (B, 5, 256). Mean-pool attended embeddings → `global_mlp(256→64→1)` → `4·sigmoid+1`. `fusion_weights` masih ada tetapi **hanya untuk interpretability** (organ importance), tidak masuk perhitungan global_score. |
-| **Motivasi** | Softmax atas skalar membuang struktur fine-grained antar organ. Cross-organ attention memungkinkan model menangkap proporsi antar bagian wajah (golden ratio, simetri eye-nose-mouth, dll). Memberikan attention map (B, 5, 5) yang bisa divisualisasikan. |
-| **Aksi** | Update paper §III.C.3 secara substansial: ganti formula softmax → cross-organ MultiheadAttention. Definisikan embed_dim=256 (= GAT_HIDDEN_DIM × GAT_NUM_HEADS), 4 heads, mean-pool + MLP head. Posisikan ini sebagai kontribusi arsitektur (label B2 di internal notes). |
+| **Paper** | Tidak disebutkan. Diasumsikan L_rank aktif dari epoch 1. |
+| **Code** [train.py:280-289](model/train.py#L280), [config.py:120-125](model/config.py#L120), [loss.py:181](model/loss.py#L181) | `rank_scale` = 0 untuk epoch 1..`RANK_FREEZE_EPOCHS` (=10); linear 0→1 untuk epoch 11..20; 1 untuk epoch ≥21. Pada awal epoch 21, `gradnorm.reset_L0()` dipanggil supaya L0_rank (yang sebelumnya ter-clamp ke 1e-8 saat L_rank=0) di-recapture. |
+| **Motivasi** | Mengaktifkan L_rank tiba-tiba menyebabkan GradNorm men-shock: rasio $L_{current}/L_0$ tidak proporsional, λ_rank berayun. Freeze memberi L_reg waktu menstabilkan baseline regresi; warmup menambahkan L_rank perlahan; reset L0 menjaga rasio tetap valid. |
+| **Aksi paper** | §III.D.4 (atau sub-bagian baru "Training Schedule"): jelaskan three-stage curriculum (freeze 10 epoch → linear warmup 10 epoch → full). Tambahkan kalimat tentang L0 reset agar pembaca paham mengapa GradNorm tetap stabil setelah unfreeze. |
 
 ---
 
-## DIFF 12 — L_rank Warmup (Freeze + Linear Ramp)
-
-| | Detail |
-|--|--------|
-| **Paper** | Tidak disebutkan — L_rank diasumsikan aktif dari epoch 1. |
-| **Code** ([train.py:280-289](model/train.py#L280), [config.py:120-125](model/config.py#L120)) | L_rank dikalikan `rank_scale` yang naik bertahap: epoch 1..10 → 0 (freeze), epoch 11..20 → linear ramp 0→1, epoch 21+ → 1. Setelah warmup selesai, [`gradnorm.reset_L0()`](model/loss.py#L181) memaksa re-capture L0 (kalau tidak, L0 yang ter-clamp ke 1e-8 saat L_rank=0 merusak balancing seterusnya). |
-| **Motivasi** | Pengaktifan tiba-tiba L_rank shock GradNorm: gradient ratio meledak, λ berayun. Freeze memberi L_reg waktu menstabilkan regresi baseline; warmup menambahkan L_rank secara halus. |
-| **Aksi** | Tambahkan ke paper §III.D.4 sub-bagian "Training Schedule": jelaskan freeze (10 ep) + linear warmup (10 ep) + L0 reset. Argumen: tanpa skema ini, λ_rank terbang ke 5+ di epoch 1–3 dan training collapse. |
-
----
-
-## DIFF 13 — Class-Balanced Pair Sampling (Tidak Ada di Paper)
+## DIFF 12 — Class-Balanced Pair Sampling (WeightedRandomSampler)
 
 | | Detail |
 |--|--------|
 | **Paper** | Tidak disebutkan. Asumsi sampling uniform. |
-| **Code** ([dataset.py:318](model/dataset.py#L318), [train.py:240](model/train.py#L240)) | `make_weighted_pair_loader` pakai `WeightedRandomSampler` dengan bucket rating `(2.0, 3.0, 4.0)` (4 kelas: Jelek <2, 2–3, 3–4, Cantik >4). Bobot `1/√count` (sqrt smoothing). Jelek (~4.7%) dan Cantik (~11%) di-boost ~3.6×. |
-| **Motivasi** | SCUT-FBP5500 heavy-imbalanced di sekitar mean (rating 2.5–3.5). Tanpa rebalance, model jatuh ke "regression-to-mean" — selalu prediksi ~3. Bucket-weighted sampling memastikan minoritas ekstrem muncul cukup sering. |
-| **Aksi** | Tambahkan ke paper §III.D.2 atau §IV (Implementation): "Pair anchors are resampled per epoch with bucket-weighted probability ∝ 1/√count over the 4 rating buckets {<2, 2–3, 3–4, >4}, mitigating regression-to-mean on the imbalanced SCUT-FBP5500 distribution." |
+| **Code** [dataset.py:318](model/dataset.py#L318), [train.py:240](model/train.py#L240) | `make_weighted_pair_loader`: bucket rating dengan edges `(2.0, 3.0, 4.0)` → 4 kelas. Sampling weight per pair $\propto 1/\sqrt{count_{bucket}}$ (smoothing "sqrt"). Jelek (<2, ~4.7%) dan Cantik (>4, ~11%) dapat boost ~3.6×. |
+| **Motivasi** | SCUT-FBP5500 sangat condong ke rating tengah (2.5–3.5). Tanpa rebalance, model jatuh ke regression-to-mean — prediksi konstan ~3 menghasilkan MAE rendah tetapi PCC rendah dan gagal di tail distribusi. |
+| **Aksi paper** | §III.D.2 atau §IV.A: "Pair anchors are resampled per epoch with bucket-weighted probability $\propto 1/\sqrt{n_b}$ over 4 rating buckets {$<$2, 2–3, 3–4, $>$4}, mitigating regression-to-mean on the imbalanced SCUT-FBP5500 rating distribution." |
 
 ---
 
-## DIFF 14 — Data Augmentation: Jitter + Horizontal Flip
+## DIFF 13 — Data Augmentation: Landmark Jitter + Horizontal Flip
 
 | | Detail |
 |--|--------|
-| **Paper** | Tidak menyebutkan augmentation. |
-| **Code** ([dataset.py:122](model/dataset.py#L122), [preprocessing.py:278](model/preprocessing.py#L278), [config.py:136-137](model/config.py#L136)) | (1) **Jitter**: `coords + N(0, σ²)` dengan σ=0.003 (~0.3% pasca inter-ocular normalization), diterapkan setiap `__getitem__`. (2) **Flip**: opsi `augment_flip` di `FaceDataset` menduplikasi dataset dengan wajah ter-mirror X-axis, label `left_eye` ↔ `right_eye` ditukar. |
-| **Motivasi** | Jitter mencegah overfit pada minoritas yang di-resample berulang oleh WeightedSampler (set unik <200 face). Flip mengeksploitasi simetri bilateral wajah. |
-| **Aksi** | Tambahkan ke paper §IV: "Landmark-space augmentations: Gaussian jitter (σ=0.003) per sample and optional horizontal mirroring with anatomically-correct left/right swap." |
+| **Paper** | Tidak ada bagian augmentasi. |
+| **Code** [dataset.py:122-125](model/dataset.py#L122), [preprocessing.py:278](model/preprocessing.py#L278), [config.py:136-137](model/config.py#L136) | (1) **Jitter**: `coords += N(0, σ²)` dengan σ=0.003 (~0.3% pasca inter-ocular normalization), diterapkan setiap `__getitem__` ketika `augment_jitter=True`. (2) **Flip**: `build_all_subgraphs_flipped` membalik X-axis dan menukar label left_eye ↔ right_eye agar tetap anatomis. Aktif lewat parameter `augment_flip` di `FaceDataset`. |
+| **Motivasi** | Jitter mencegah overfit pada bucket minoritas (set unik <200 wajah) yang di-resample berulang oleh WeightedSampler. Flip mengeksploitasi simetri bilateral. |
+| **Aksi paper** | §IV.A: tambahkan kalimat "Landmark-space augmentations are applied: Gaussian jitter ($\sigma = 0.003$) on each sample and optional horizontal mirroring with anatomically-correct left/right organ swap." |
 
 ---
 
-## DIFF 15 — Gradient Clipping (Tidak Ada di Paper)
+## DIFF 14 — Gradient Clipping (Tidak Disebutkan di Paper)
 
 | | Detail |
 |--|--------|
-| **Paper** | Tidak disebutkan. |
-| **Code** ([train.py:301](model/train.py#L301)) | `torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)` setelah `total_loss.backward()`. |
-| **Motivasi** | L_rank softmax-margin (`log1p(exp(s_B − s_A))`) bisa meledak ketika selisih besar — clip mencegah update destruktif. |
-| **Aksi** | Tambahkan kalimat singkat di §IV (Implementation): "Gradient norm clipped at 5.0 to prevent loss spikes from extreme ranking margins." |
+| **Paper** | Tidak ada. |
+| **Code** [train.py:301](model/train.py#L301) | `torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)` setelah `total_loss.backward()`. |
+| **Motivasi** | L_rank menggunakan softmax-margin (`log1p(exp(s_B − s_A))`) yang bisa meledak saat selisih besar. Clipping mencegah update destruktif. |
+| **Aksi paper** | §IV.A: "Gradient norm clipped at 5.0 to prevent loss spikes from extreme ranking margins." |
 
 ---
 
-## DIFF 16 — Beauty Axis Projection (Implementasi Alternatif, Belum di Paper)
+## DIFF 15 — Validasi Local Score: Proximity ke Avg Face → Spearman ρ vs Pseudo-Score (Beauty-Axis)
 
 | | Detail |
 |--|--------|
-| **Paper** | Tidak disebutkan. |
-| **Code** ([pseudo_labels.py:188](model/pseudo_labels.py#L188), [pseudo_labels.py:386](model/pseudo_labels.py#L386)) | Fungsi `compute_beauty_axis`, `project_organ_onto_axis`, `compute_all_pseudo_labels_beauty_axis`: pseudo-label berdasarkan proyeksi skalar `(face − population_mean) · (beauty_prototype − population_mean)`. Bukan jarak ke prototype, melainkan arah sepanjang "beauty axis". |
-| **Motivasi** | Said & Todorov (2011), DeBruine & Jones (2007): attractiveness adalah **arah** di face space, bukan proximity ke titik tunggal. Caricature beautiful faces lebih jauh dari mean tapi lebih cantik. |
-| **Aksi** | Bila digunakan untuk ablation, paper §III.D.1 perlu menambahkan formulasi alternatif sebagai eksperimen pembanding. Bila tidak dipakai untuk experimen utama, biarkan sebagai kode referensi tanpa update paper. |
-
----
-
-## DIFF 17 — Modal A100 Deployment (Infra, Belum di Paper)
-
-| | Detail |
-|--|--------|
-| **Paper** (§IV / Implementation) | Disebut: "Implemented in PyTorch + DGL. Training on Google Colab T4." |
-| **Code** ([modal/app.py](modal/app.py), [modal/app_dgf.py](modal/app_dgf.py), [modal/upload_cache.py](modal/upload_cache.py)) | Training migrasi ke **Modal A100-40GB**. Tiga volume persistent: `frn-data` (CSV), `frn-cache` (landmarks/pseudo/avg_face), `frn-checkpoints` (best checkpoint). `app_dgf.py` menyiapkan jalur paralel untuk varian DeepGeoFusion (`model_dgf/`) dengan checkpoint terpisah. |
-| **Aksi** | Update paper §IV: ganti "T4" → "Modal A100-40GB"; sebutkan resume-from-checkpoint mechanism. Bila DGF jadi bagian paper, tambahkan deskripsi setup paralel. |
+| **Paper** §III.E | "Verifying that facial components geometrically **closer to the Universal Average Face** receive proportionally **higher** aesthetic scores." |
+| **Code** [evaluate.py:116-183](model/evaluate.py#L116) | `validate_local_scores`: untuk tiap organ menghitung Spearman ρ antara `pseudo_score` dan `predicted local_score`. Test: PASS jika kelima organ ρ > 0. Tidak mengukur jarak Euclidean langsung. |
+| **Implikasi setelah DIFF 2 & 3** | Karena pseudo-score sekarang berbasis **proyeksi pada beauty axis**, validasi sebenarnya menguji apakah local score model konsisten dengan "higher projection along beauty axis → higher score" — bukan "closer to average face". |
+| **Aksi paper** | §III.E: ganti pernyataan validasi. Alih-alih "closer to Universal Average Face → higher score", tulis: "organ scores must be monotonically aligned with the projection of the organ onto the beauty axis $(\beta - \mu)$." Metric: Spearman ρ antara predicted organ score dan pseudo-score, PASS = ρ > 0 pada kelima organ. |
 
 ---
 
@@ -192,20 +173,18 @@ Dokumen ini mencatat **semua perbedaan antara klaim di paper (`FaceRankNet_Paper
 
 | DIFF | Bagian Paper | Jenis Perubahan |
 |------|-------------|-----------------|
-| 1 | §III.B, §III.C.1 | Update formula & motivasi 6-dim node feature |
-| 2 | §III.D.1 | Ganti MSE→RMSE, linear→percentile, tambah motivasi |
-| 3 | §I, §III.C, §III.D.1 | Tambah beauty prototype sebagai kontribusi H1 |
-| 4 | §III.D.2 | Tambah H2 consistency filter + confidence margin |
-| 5 | §III.D.3, §III.D.4 | Pisahkan L_div dari GradNorm; α 1.5 → 0.5 |
-| 6 | §III.D.3 | Klarifikasi L_reg menggunakan kedua wajah A+B |
-| 7 | §III.D.2 | Tambahkan pair resampling per epoch |
-| 8 | §III.C.2 | Spesifikasikan K=4 multi-head GAT + formula update |
-| 9 | §III.B.3 | Tambahkan fully-connected + self-loop sub-graph |
-| 10 | §III.E | Update referensi: avg face → beauty prototype |
-| 11 | §III.C.3 | Ganti softmax fusion → cross-organ MultiheadAttention (B2) |
-| 12 | §III.D.4 | Tambah L_rank freeze + warmup + L0 reset |
-| 13 | §III.D.2 / §IV | Tambah WeightedRandomSampler untuk rating bucket |
-| 14 | §IV | Tambah jitter (σ=0.003) + horizontal flip augmentation |
-| 15 | §IV | Tambah gradient clipping (max_norm=5.0) |
-| 16 | §III.D.1 (opsional) | Beauty axis projection sebagai ablation alternatif |
-| 17 | §IV | Migrasi Colab T4 → Modal A100 |
+| 1  | §III.B.2, §III.C.1 | Update dim node feature 3 → 6, tambah deviasi dari population_mean |
+| 2  | §III.D.1 | Proximity-to-mean (MSE+linear) → **Beauty-axis projection + percentile rank** |
+| 3  | §I, §III.D.1 | Dua reference (population_mean + beauty_prototype) per ethnicity untuk konstruksi beauty axis |
+| 4  | §III.D.2 | H2 holistic filter + confidence margin |
+| 5  | §III.D.3, §III.D.4 | Pisahkan L_div dari GradNorm; fixed λ₃ = 0.01 |
+| 6  | §III.D.3 | L_reg memakai kedua wajah dalam pair |
+| 7  | §III.D.2 | Pair resampling per epoch |
+| 8  | §III.C.2 | Formula GAT multi-head K=4, output 256-dim |
+| 9  | §III.B.3 | Fully-connected sub-graph + self-loops |
+| 10 | §III.C.5 | Softmax fusion → cross-organ MultiheadAttention |
+| 11 | §III.D.4 | L_rank freeze + warmup + GradNorm L0 reset |
+| 12 | §III.D.2 / §IV.A | Class-balanced WeightedRandomSampler (sqrt smoothing) |
+| 13 | §IV.A | Jitter (σ=0.003) + horizontal flip augmentation |
+| 14 | §IV.A | Gradient clipping (max_norm=5.0) |
+| 15 | §III.E | Validitas via Spearman ρ vs pseudo-score (bukan jarak literal) |
