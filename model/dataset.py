@@ -61,7 +61,7 @@ class FaceDataset(Dataset):
 
     def __init__(
         self,
-        csv_path: str,
+        csv_path: "str | pd.DataFrame",
         coords_cache: dict[str, np.ndarray],
         pseudo_labels: dict[str, dict[str, float]] | None = None,
         avg_face: np.ndarray | None = None,
@@ -71,7 +71,10 @@ class FaceDataset(Dataset):
         compute_lds_weights: bool = False,
         mixup_within_bucket: bool = False,
     ) -> None:
-        df = pd.read_csv(csv_path)
+        if isinstance(csv_path, pd.DataFrame):
+            df = csv_path.reset_index(drop=True)
+        else:
+            df = pd.read_csv(csv_path)
 
         # Keep only rows with available landmarks
         mask = df[config.COL_FILENAME].isin(coords_cache)
@@ -326,9 +329,11 @@ class PairDataset(Dataset):
                 if not pseudo_b:
                     continue
 
-                # H2: only train L_rank when holistic order agrees with pseudo order
+                # H2: only train L_rank when holistic order agrees with pseudo order.
+                # MIN_PAIR_RATING_GAP tightens this beyond simple > to skip near-tie
+                # pairs whose L_rank signal is too noisy to be useful.
                 rating_b = self.ds.ratings[b_idx]
-                if rating_a <= rating_b:
+                if rating_a - rating_b < config.MIN_PAIR_RATING_GAP:
                     continue
 
                 # Valid if A scores higher than B in at least one organ

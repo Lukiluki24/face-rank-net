@@ -18,22 +18,15 @@ cache_dir/
     test_landmarks.pkl
     pseudo_labels.pkl
     avg_face.npy
-    aug_train_landmarks.pkl   (OPTIONAL — pseudo-label-time MixUp / synthaug)
 
 data_dir/
     train_labels.csv
     test_labels.csv
-    aug_train_labels.csv      (OPTIONAL — synthaug rows)
-
-Optional aug_* files are uploaded only if present. With them in the volume
-and ``use_augmented_train=True`` (default) in app.py, Modal training uses
-the augmented set; without them, it falls back to the original cache.
 
 After uploading, run training:
-    modal run modal/app.py                                  # resume + synthaug
-    modal run modal/app.py --no-use-augmented-train         # original cache
-    modal run modal/app.py --no-resume                      # fresh start
-    modal run --detach modal/app.py                         # long runs
+    modal run modal/app.py                         # resume if checkpoint exists
+    modal run modal/app.py --no-resume             # force fresh start
+    modal run --detach modal/app.py                # detached (survives disconnect)
 """
 
 from __future__ import annotations
@@ -49,18 +42,9 @@ CACHE_FILES = (
     "pseudo_labels.pkl",
     "avg_face.npy",
 )
-# Optional cache files — uploaded only if present in --cache-dir.
-# aug_train_landmarks.pkl holds real + synth coords from Cell 5d (synthaug).
-OPTIONAL_CACHE_FILES = (
-    "aug_train_landmarks.pkl",
-)
 DATA_FILES = (
     "train_labels.csv",
     "test_labels.csv",
-)
-# Optional data files — same rule. aug_train_labels.csv carries the synth rows.
-OPTIONAL_DATA_FILES = (
-    "aug_train_labels.csv",
 )
 
 
@@ -105,12 +89,6 @@ def main() -> None:
             if not path.exists():
                 raise SystemExit(f"missing required cache file: {path}")
             cache_files.append((path, f"/{name}"))
-        # Augmented landmark cache is optional; include if user generated it.
-        for name in OPTIONAL_CACHE_FILES:
-            path = args.cache_dir / name
-            if path.exists():
-                cache_files.append((path, f"/{name}"))
-                print(f"   (optional) found {name}")
         _upload("frn-cache", cache_files)
 
     # ── Data / CSV files ───────────────────────────────────────────────────────
@@ -121,12 +99,6 @@ def main() -> None:
             if not path.exists():
                 raise SystemExit(f"missing required data file: {path}")
             data_files.append((path, f"/{name}"))
-        # Augmented CSV is optional; include if user generated it.
-        for name in OPTIONAL_DATA_FILES:
-            path = args.data_dir / name
-            if path.exists():
-                data_files.append((path, f"/{name}"))
-                print(f"   (optional) found {name}")
         _upload("frn-data", data_files)
 
     # ── Checkpoint ─────────────────────────────────────────────────────────────

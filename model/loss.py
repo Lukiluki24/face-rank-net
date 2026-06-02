@@ -1,13 +1,14 @@
 """
 loss.py — FaceRankNet
 ======================
-Implements the three loss components and GradNorm.
+Implements the three loss components, GradNorm, and PCGrad.
 
 Functions
 ---------
 l_reg(global_pred, global_gt)           — MSE regression loss
 l_rank(scores_A, scores_B, organ_mask) — Pairwise ranking loss (per organ)
 l_div(local_scores)                    — Diversity regularisation (-Var)
+pcgrad_organ_update(...)               — PCGrad + organ-scope split backward
 
 Class
 -----
@@ -118,12 +119,16 @@ def l_rank(
 
 def l_div(local_scores: dict[str, torch.Tensor]) -> torch.Tensor:
     """
-    Diversity regularisation: negative variance of organ scores.
+    Diversity regularisation: within-organ variance across the batch + boundary penalty.
 
-    Encourages the model to produce diverse local scores rather than
-    collapsing all organs to the same value.
+    Two components:
+    1. Within-organ diversity: for each organ, penalise if all faces get the same score.
+       Encourages each organ to discriminate between faces (not collapse to a constant).
+       L_within = -mean_over_organs( Var_over_batch(score_organ) )
 
-        L_div = -Var( [s_left_eye, s_right_eye, s_nose, s_mouth, s_jawline] )
+    2. Boundary penalty: penalise scores that saturate near 1.0 or 5.0, where
+       sigmoid gradients vanish and recovery becomes impossible.
+       L_boundary = mean_over_organs( mean_over_batch( relu(1.2 - s) + relu(s - 4.8) ) )
 
     Parameters
     ----------
@@ -132,13 +137,92 @@ def l_div(local_scores: dict[str, torch.Tensor]) -> torch.Tensor:
 
     Returns
     -------
-    Tensor — scalar (negative variance, so minimising → maximising diversity).
+    Tensor — scalar loss (minimising = more diverse, less saturated).
     """
     stacked = torch.stack(
         [local_scores[o] for o in ORGAN_ORDER], dim=-1
     )  # (B, 5)
-    var = stacked.var(dim=-1).mean()   # mean variance over batch
-    return -var
+
+    # Component 1: within-organ diversity (variance across batch, per organ)
+    # stacked.var(dim=0) → (5,): variance of each organ across B faces
+    within_var = stacked.var(dim=0).mean()   # mean across organs
+    l_within = -within_var
+
+    # Component 2: boundary penalty — keep scores in (1.2, 4.8) safe zone
+    l_boundary = (
+        torch.relu(1.2 - stacked) + torch.relu(stacked - 4.8)
+    ).mean()
+
+    return l_within + l_boundary
+
+
+# ---------------------------------------------------------------------------
+# PCGrad + Organ-Scope — combined backward for simplified_all variant
+# ---------------------------------------------------------------------------
+
+def pcgrad_organ_update(
+    model: nn.Module,
+    loss_base: torch.Tensor,
+    loss_rank_w: torch.Tensor,
+    optimizer: torch.optim.Optimizer,
+) -> None:
+    """
+    Split backward combining PCGrad (Option 3) and organ-scope (Option 2).
+
+    Option 2: L_rank gradient is zeroed for parameters outside OrganGAT
+              (i.e. fusion MLP and cross-organ attention are shielded).
+    Option 3: L_rank gradient is projected onto the orthogonal complement of
+              the L_base gradient whenever they conflict (dot product < 0),
+              following Yu et al. 2020 (PCGrad / Gradient Surgery).
+
+    Parameters
+    ----------
+    model        : FaceRankNet — the shared network.
+    loss_base    : λ_reg·L_reg + LDIV_WEIGHT·L_div  (graph must still be alive).
+    loss_rank_w  : λ_rank·L_rank                    (graph must still be alive).
+    optimizer    : task optimiser, used only for zero_grad calls.
+
+    After this call p.grad is set on every parameter and ready for
+    clip_grad_norm_ + optimizer.step().
+    """
+    organ_param_names: frozenset[str] = frozenset(
+        n for n, _ in model.named_parameters() if "organ_gats" in n
+    )
+
+    # Step 1: base (L_reg + L_div) backward → gradients for all params
+    optimizer.zero_grad()
+    loss_base.backward(retain_graph=True)
+    g_base: dict[str, torch.Tensor | None] = {
+        n: (p.grad.clone() if p.grad is not None else None)
+        for n, p in model.named_parameters()
+    }
+
+    # Step 2: L_rank backward → gradients (graph freed after this)
+    optimizer.zero_grad()
+    loss_rank_w.backward()
+
+    # Step 3: organ-scope + PCGrad projection + combine
+    for name, p in model.named_parameters():
+        g_r = p.grad          # L_rank gradient (None for params not on path)
+        g_b = g_base.get(name)
+
+        # Option 2: restrict L_rank gradient to OrganGAT parameters only
+        if name not in organ_param_names:
+            g_r = None
+
+        # Option 3: PCGrad — project g_r onto orthogonal complement of g_b
+        if g_r is not None and g_b is not None:
+            dot = (g_b * g_r).sum()
+            if dot < 0:
+                g_r = g_r - (dot / (g_b.norm() ** 2 + 1e-8)) * g_b
+
+        # Set final gradient
+        if g_b is not None and g_r is not None:
+            p.grad = g_b + g_r
+        elif g_b is not None:
+            p.grad = g_b
+        else:
+            p.grad = None
 
 
 # ---------------------------------------------------------------------------

@@ -130,6 +130,11 @@ RANK_WARMUP_EPOCHS: int = 10
 # Recommended 0.2-0.4 given pseudo-label Spearman ρ ≈ 0.57.
 RANK_PSEUDO_MARGIN: float = 0.3
 
+# Minimum holistic rating gap for H2 pair filter. Pairs where
+# rating_a - rating_b < this value are skipped — near-tie holistic
+# ratings produce noisy L_rank gradients. Default 0.5 (half a scale step).
+MIN_PAIR_RATING_GAP: float = 0.5
+
 # Landmark jitter — small Gaussian noise added to (x, y, z) on each
 # __getitem__ call. After centroid-normalization landmark coords typically
 # fall in ~[-1, 1], so σ=0.003 ≈ 0.3% noise (well below MediaPipe error).
