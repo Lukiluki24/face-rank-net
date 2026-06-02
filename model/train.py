@@ -35,11 +35,8 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.optim as optim
-<<<<<<< HEAD
 from sklearn.model_selection import train_test_split
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-=======
->>>>>>> parent of ac45bd7 (add: lr scheduler)
 from tqdm import tqdm
 
 import config
@@ -306,12 +303,9 @@ def train(
     # ---- Optimiser (task parameters only; GradNorm handles lambda separately) ----
     optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
 
-<<<<<<< HEAD
     # ---- LR Scheduler: patience=3, mode=max on val PCC ----
     scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=3, verbose=True)
 
-=======
->>>>>>> parent of ac45bd7 (add: lr scheduler)
     # ---- GradNorm ----
     gradnorm = GradNorm(model, num_tasks=config.NUM_TASKS, alpha=config.GRADNORM_ALPHA)
 
