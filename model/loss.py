@@ -145,7 +145,7 @@ def l_div(local_scores: dict[str, torch.Tensor]) -> torch.Tensor:
 
     # Component 1: within-organ diversity (variance across batch, per organ)
     # stacked.var(dim=0) → (5,): variance of each organ across B faces
-    within_var = stacked.var(dim=0).mean()   # mean across organs
+    within_var = stacked.var(dim=0, correction=0).mean()   # mean across organs
     l_within = -within_var
 
     # Component 2: boundary penalty — keep scores in (1.2, 4.8) safe zone

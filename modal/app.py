@@ -213,11 +213,109 @@ def train_remote(
 
 
 # ---------------------------------------------------------------------------
+# Simplified training (GradNorm from epoch 1, no freeze/warmup)
+# Saves to checkpoint_simplified.pt — independent of main checkpoint.
+# Run: modal run modal/app.py::main_simplified
+# ---------------------------------------------------------------------------
+@app.function(
+    gpu="A100-40GB",
+    volumes={
+        DATA_DIR: data_vol,
+        CACHE_DIR: cache_vol,
+        CKPT_DIR: ckpt_vol,
+    },
+    timeout=60 * 60 * 6,
+)
+def train_simplified_remote(
+    num_epochs: int = 50,
+    batch_size: int = 32,
+    lr: float = 1e-3,
+    weight_decay: float = 1e-4,
+    resume: bool = True,
+    use_augmented_train: bool = True,
+) -> dict:
+    import sys
+    sys.path.insert(0, "/root/face_rank_net")
+
+    import config
+
+    config.AVG_FACE_CACHE          = Path(CACHE_DIR) / "avg_face.npy"
+    config.LANDMARK_CACHE_TRAIN    = Path(CACHE_DIR) / "train_landmarks.pkl"
+    config.LANDMARK_CACHE_TEST     = Path(CACHE_DIR) / "test_landmarks.pkl"
+    config.PSEUDO_LABEL_CACHE      = Path(CACHE_DIR) / "pseudo_labels.pkl"
+    config.CHECKPOINT_PATH         = Path(CKPT_DIR)  / "checkpoint_simplified.pt"
+
+    aug_csv   = Path(DATA_DIR)  / "aug_train_labels.csv"
+    aug_cache = Path(CACHE_DIR) / "aug_train_landmarks.pkl"
+    if use_augmented_train and aug_csv.exists() and aug_cache.exists():
+        train_csv            = str(aug_csv)
+        landmark_cache_train = str(aug_cache)
+        dataset_tag = "synthaug (real + synthetic tail)"
+    else:
+        if use_augmented_train:
+            print("⚠ augmented files missing — falling back to original cache.")
+        train_csv            = str(Path(DATA_DIR)  / "train_labels.csv")
+        landmark_cache_train = str(config.LANDMARK_CACHE_TRAIN)
+        dataset_tag = "original (no synthaug)"
+
+    print("=" * 60)
+    print("FaceRankNet — Modal A100 training [SIMPLIFIED — no warmup]")
+    print(f"  dataset    : {dataset_tag}")
+    print(f"  epochs     : {num_epochs}")
+    print(f"  checkpoint : {config.CHECKPOINT_PATH}")
+    ckpt_exists = config.CHECKPOINT_PATH.exists()
+    if ckpt_exists:
+        import torch
+        ckpt_meta = torch.load(config.CHECKPOINT_PATH, map_location="cpu")
+        print(f"  → resuming from epoch {ckpt_meta['epoch']}, "
+              f"best_pcc={ckpt_meta['best_pcc']:.4f}")
+    else:
+        print("  → no checkpoint found, starting from scratch")
+    print("=" * 60)
+
+    from train import train_simple  # noqa: E402
+
+    train_simple(
+        train_csv=train_csv,
+        test_csv=str(Path(DATA_DIR) / "test_labels.csv"),
+        landmark_cache_train=landmark_cache_train,
+        landmark_cache_test=str(config.LANDMARK_CACHE_TEST),
+        pseudo_labels_path=str(config.PSEUDO_LABEL_CACHE),
+        avg_face_path=str(config.AVG_FACE_CACHE),
+        num_epochs=num_epochs,
+        batch_size=batch_size,
+        lr=lr,
+        weight_decay=weight_decay,
+        checkpoint_path=str(config.CHECKPOINT_PATH),
+        resume=resume,
+    )
+
+    ckpt_vol.commit()
+
+    import torch
+    ckpt = torch.load(config.CHECKPOINT_PATH, map_location="cpu")
+    result = {
+        "best_pcc":   float(ckpt["best_pcc"]),
+        "best_epoch": int(ckpt["epoch"]),
+        "checkpoint": str(config.CHECKPOINT_PATH),
+    }
+    print("\n" + "=" * 60)
+    print(f"Training done — best PCC={result['best_pcc']:.4f} at epoch {result['best_epoch']}")
+    print("=" * 60)
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Download the trained checkpoint to the local machine
 # ---------------------------------------------------------------------------
 @app.function(volumes={CKPT_DIR: ckpt_vol})
 def fetch_checkpoint() -> bytes:
     return (Path(CKPT_DIR) / "checkpoint_best.pt").read_bytes()
+
+
+@app.function(volumes={CKPT_DIR: ckpt_vol})
+def fetch_checkpoint_simplified() -> bytes:
+    return (Path(CKPT_DIR) / "checkpoint_simplified.pt").read_bytes()
 
 
 # ---------------------------------------------------------------------------
@@ -235,6 +333,43 @@ def stop_training() -> str:
 # ---------------------------------------------------------------------------
 # Local entrypoint
 # ---------------------------------------------------------------------------
+@app.local_entrypoint()
+def main_simplified(
+    epochs: int = 50,
+    batch_size: int = 32,
+    lr: float = 1e-3,
+    weight_decay: float = 1e-4,
+    resume: bool = True,
+    use_augmented_train: bool = True,
+    download: bool = False,
+    download_to: str = "checkpoint_simplified.pt",
+):
+    """GradNorm from epoch 1, no freeze/warmup. Saves to checkpoint_simplified.pt."""
+    print(
+        f"Submitting simplified training job — "
+        f"epochs={epochs}, batch_size={batch_size}, lr={lr}, "
+        f"resume={resume}, augmented={use_augmented_train}"
+    )
+    result = train_simplified_remote.remote(
+        num_epochs=epochs,
+        batch_size=batch_size,
+        lr=lr,
+        weight_decay=weight_decay,
+        resume=resume,
+        use_augmented_train=use_augmented_train,
+    )
+    print("Training complete:")
+    print(f"  best PCC  : {result['best_pcc']:.4f}")
+    print(f"  best epoch: {result['best_epoch']}")
+    print(f"  checkpoint: {result['checkpoint']}  (in volume 'frn-checkpoints')")
+
+    if download:
+        print(f"Downloading checkpoint → {download_to} ...")
+        blob = fetch_checkpoint_simplified.remote()
+        Path(download_to).write_bytes(blob)
+        print(f"Saved {len(blob) / 1e6:.1f} MB to {download_to}")
+
+
 @app.local_entrypoint()
 def main(
     epochs: int = 50,

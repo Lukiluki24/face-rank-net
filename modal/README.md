@@ -63,14 +63,14 @@ modal run modal/app.py --no-resume
 
 
 # Download training curves (they're in the frn-checkpoints volume)
-modal volume get frn-checkpoints results.csv .
-modal volume get frn-checkpoints results_simplified.csv .
+modal volume get frn-checkpoints results.csv modal/result/
 
-modal volume get frn-checkpoints training_curves.png .
-modal volume get frn-checkpoints training_curves_simplified.png .
+modal volume get frn-checkpoints training_curves.png modal/result/
 
-modal volume get frn-checkpoints checkpoint_best_simplified.pt .
-modal volume get frn-checkpoints checkpoint_best.pt .
+modal volume get frn-checkpoints checkpoint_best.pt modal/result/
+
+modal volume get frn-checkpoints checkpoint_simplified.pt modal/result          
+
 
 # simplified gradnorm
 modal run --detach modal/app.py::main_simplified
