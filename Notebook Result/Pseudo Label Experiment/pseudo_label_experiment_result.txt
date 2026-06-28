@@ -1,0 +1,272 @@
+
+========== Pseudo-Label Quality Report: rmse_eth ==========
+  n=4400  Spearman rho=0.2957  Pearson r=0.2838
+
+  Per organ:
+    left_eye    rho=+0.2200  n=4400
+    right_eye   rho=+0.2729  n=4400
+    nose        rho=+0.2619  n=4400
+    mouth       rho=+0.3550  n=4400
+    jawline     rho=+0.2437  n=4400
+  Per ethnicity:
+    Caucasian   rho=+0.2294  n=1222
+    Asian       rho=+0.3496  n=3178
+  Per gender:
+    Female      rho=+0.2298  n=2209
+    Male        rho=+0.3116  n=2191
+  Per (eth x gen):
+    Caucasian_Female     rho=+0.2519  n=612
+    Asian_Female         rho=+0.2455  n=1597
+    Asian_Male           rho=+0.3803  n=1581
+    Caucasian_Male       rho=+0.2011  n=610
+  Per rating bucket:
+    Jelek (<2)     rho=+0.0267  n=188
+    Avg (2-3)      rho=+0.1768  n=2412
+    Mid (3-4)      rho=+0.0398  n=1294
+    Cantik (>=4)   rho=-0.0202  n=506
+====================================================
+
+
+========== Pseudo-Label Quality Report: axis_eth ==========
+  n=4400  Spearman rho=0.5740  Pearson r=0.5664
+
+  Per organ:
+    left_eye    rho=+0.4472  n=4400
+    right_eye   rho=+0.4773  n=4400
+    nose        rho=+0.5833  n=4400
+    mouth       rho=+0.5668  n=4400
+    jawline     rho=+0.5593  n=4400
+  Per ethnicity:
+    Caucasian   rho=+0.5582  n=1222
+    Asian       rho=+0.5772  n=3178
+  Per gender:
+    Female      rho=+0.5745  n=2209
+    Male        rho=+0.5282  n=2191
+  Per (eth x gen):
+    Caucasian_Female     rho=+0.5677  n=612
+    Asian_Female         rho=+0.5888  n=1597
+    Asian_Male           rho=+0.5124  n=1581
+    Caucasian_Male       rho=+0.5261  n=610
+  Per rating bucket:
+    Jelek (<2)     rho=-0.0910  n=188
+    Avg (2-3)      rho=+0.2306  n=2412
+    Mid (3-4)      rho=+0.2653  n=1294
+    Cantik (>=4)   rho=+0.0258  n=506
+====================================================
+
+
+========== Pseudo-Label Quality Report: axis_eth_gen ==========
+  n=4400  Spearman rho=0.5564  Pearson r=0.5525
+
+  Per organ:
+    left_eye    rho=+0.4272  n=4400
+    right_eye   rho=+0.4565  n=4400
+    nose        rho=+0.5672  n=4400
+    mouth       rho=+0.5498  n=4400
+    jawline     rho=+0.5401  n=4400
+  Per ethnicity:
+    Caucasian   rho=+0.5475  n=1222
+    Asian       rho=+0.5587  n=3178
+  Per gender:
+    Female      rho=+0.5947  n=2209
+    Male        rho=+0.5114  n=2191
+  Per (eth x gen):
+    Caucasian_Female     rho=+0.6024  n=612
+    Asian_Female         rho=+0.5927  n=1597
+    Asian_Male           rho=+0.5124  n=1581
+    Caucasian_Male       rho=+0.5061  n=610
+  Per rating bucket:
+    Jelek (<2)     rho=-0.0075  n=188
+    Avg (2-3)      rho=+0.2322  n=2412
+    Mid (3-4)      rho=+0.2485  n=1294
+    Cantik (>=4)   rho=+0.0697  n=506
+========================================================
+
+
+========== Pseudo-Label Quality Report: axis_eth_kmeans ==========
+  n=4400  Spearman rho=0.4786  Pearson r=0.4919
+
+  Per organ:
+    left_eye    rho=+0.1847  n=4400
+    right_eye   rho=+0.3027  n=4400
+    nose        rho=+0.5236  n=4400
+    mouth       rho=+0.5246  n=4400
+    jawline     rho=+0.5056  n=4400
+  Per ethnicity:
+    Caucasian   rho=+0.3278  n=1222
+    Asian       rho=+0.5129  n=3178
+  Per gender:
+    Female      rho=+0.4965  n=2209
+    Male        rho=+0.4066  n=2191
+  Per (eth x gen):
+    Caucasian_Female     rho=+0.3375  n=612
+    Asian_Female         rho=+0.5535  n=1597
+    Asian_Male           rho=+0.3859  n=1581
+    Caucasian_Male       rho=+0.3043  n=610
+  Per rating bucket:
+    Jelek (<2)     rho=-0.0995  n=188
+    Avg (2-3)      rho=+0.0939  n=2412
+    Mid (3-4)      rho=+0.2485  n=1294
+    Cantik (>=4)   rho=+0.0819  n=506
+===========================================================
+
+
+========== Pseudo-Label Quality Report: axis_eth_quantile ==========
+  n=4400  Spearman rho=0.5768  Pearson r=0.5730
+
+  Per organ:
+    left_eye    rho=+0.4471  n=4400
+    right_eye   rho=+0.4773  n=4400
+    nose        rho=+0.5832  n=4400
+    mouth       rho=+0.5668  n=4400
+    jawline     rho=+0.5595  n=4400
+  Per ethnicity:
+    Caucasian   rho=+0.5544  n=1222
+    Asian       rho=+0.5813  n=3178
+  Per gender:
+    Female      rho=+0.5790  n=2209
+    Male        rho=+0.5300  n=2191
+  Per (eth x gen):
+    Caucasian_Female     rho=+0.5612  n=612
+    Asian_Female         rho=+0.5944  n=1597
+    Asian_Male           rho=+0.5158  n=1581
+    Caucasian_Male       rho=+0.5254  n=610
+  Per rating bucket:
+    Jelek (<2)     rho=-0.0983  n=188
+    Avg (2-3)      rho=+0.2309  n=2412
+    Mid (3-4)      rho=+0.2662  n=1294
+    Cantik (>=4)   rho=+0.0264  n=506
+=============================================================
+
+
+========== Pseudo-Label Quality Report: axis_eth_synthaug ==========
+  n=4400  Spearman rho=0.5742  Pearson r=0.5709
+
+  Per organ:
+    left_eye    rho=+0.4462  n=4400
+    right_eye   rho=+0.4767  n=4400
+    nose        rho=+0.5801  n=4400
+    mouth       rho=+0.5671  n=4400
+    jawline     rho=+0.5580  n=4400
+  Per ethnicity:
+    Caucasian   rho=+0.5507  n=1222
+    Asian       rho=+0.5807  n=3178
+  Per gender:
+    Female      rho=+0.5740  n=2209
+    Male        rho=+0.5291  n=2191
+  Per (eth x gen):
+    Caucasian_Female     rho=+0.5561  n=612
+    Asian_Female         rho=+0.5924  n=1597
+    Asian_Male           rho=+0.5164  n=1581
+    Caucasian_Male       rho=+0.5245  n=610
+  Per rating bucket:
+    Jelek (<2)     rho=-0.0938  n=188
+    Avg (2-3)      rho=+0.2309  n=2412
+    Mid (3-4)      rho=+0.2614  n=1294
+    Cantik (>=4)   rho=+0.0218  n=506
+=============================================================
+
+
+========== Pseudo-Label Quality Report: symmetry ==========
+  n=4400  Spearman rho=-0.1603  Pearson r=-0.1624
+
+  Per organ:
+    left_eye    rho=-0.1509  n=4400
+    right_eye   rho=-0.1525  n=4400
+    nose        rho=-0.1902  n=4400
+    mouth       rho=-0.1189  n=4400
+    jawline     rho=-0.1676  n=4400
+  Per ethnicity:
+    Caucasian   rho=-0.0478  n=1222
+    Asian       rho=-0.1670  n=3178
+  Per gender:
+    Female      rho=-0.1270  n=2209
+    Male        rho=-0.1782  n=2191
+  Per (eth x gen):
+    Caucasian_Female     rho=+0.0315  n=612
+    Asian_Female         rho=-0.1813  n=1597
+    Asian_Male           rho=-0.1251  n=1581
+    Caucasian_Male       rho=-0.1219  n=610
+  Per rating bucket:
+    Jelek (<2)     rho=+0.1489  n=188
+    Avg (2-3)      rho=-0.0253  n=2412
+    Mid (3-4)      rho=-0.0772  n=1294
+    Cantik (>=4)   rho=-0.0417  n=506
+====================================================
+
+
+========== Pseudo-Label Quality Report: canons ==========
+  n=4400  Spearman rho=0.3503  Pearson r=0.3457
+
+  Per organ:
+    left_eye    rho=+0.2300  n=4400
+    right_eye   rho=+0.2300  n=4400
+    nose        rho=+0.4299  n=4400
+    mouth       rho=-0.0478  n=4400
+    jawline     rho=+0.1066  n=4400
+  Per ethnicity:
+    Caucasian   rho=+0.0989  n=1222
+    Asian       rho=+0.4357  n=3178
+  Per gender:
+    Female      rho=+0.2999  n=2209
+    Male        rho=+0.3578  n=2191
+  Per (eth x gen):
+    Caucasian_Female     rho=+0.0989  n=612
+    Asian_Female         rho=+0.3870  n=1597
+    Asian_Male           rho=+0.4231  n=1581
+    Caucasian_Male       rho=+0.0425  n=610
+  Per rating bucket:
+    Jelek (<2)     rho=-0.0186  n=188
+    Avg (2-3)      rho=+0.1907  n=2412
+    Mid (3-4)      rho=+0.1071  n=1294
+    Cantik (>=4)   rho=+0.1210  n=506
+==================================================
+
+
+========== Pseudo-Label Quality Report: axis_quantile_canons_sym ==========
+  n=4400  Spearman rho=0.4301  Pearson r=0.4324
+
+  Per organ:
+    left_eye    rho=+0.3573  n=4400
+    right_eye   rho=+0.3755  n=4400
+    nose        rho=+0.4417  n=4400
+    mouth       rho=+0.3017  n=4400
+    jawline     rho=+0.3065  n=4400
+  Per ethnicity:
+    Asian       rho=+0.4601  n=3178
+    Caucasian   rho=+0.4160  n=1222
+  Per gender:
+    Female      rho=+0.4275  n=2209
+    Male        rho=+0.3750  n=2191
+  Per (eth x gen):
+    Asian_Female         rho=+0.4497  n=1597
+    Caucasian_Female     rho=+0.4572  n=612
+    Caucasian_Male       rho=+0.3462  n=610
+    Asian_Male           rho=+0.4024  n=1581
+  Per rating bucket:
+    Jelek (<2)     rho=+0.0383  n=188
+    Avg (2-3)      rho=+0.2024  n=2412
+    Mid (3-4)      rho=+0.1529  n=1294
+    Cantik (>=4)   rho=+0.0299  n=506
+====================================================================
+
+
+Quantile remap per-organ rho max diff vs axis_eth: 0.000164
+
+==============================================================================================================
+rank  method                         rho_glob   pearson       AF       AM       CF       CM    Jelek   Cantik      n
+--------------------------------------------------------------------------------------------------------------
+*  1  axis_eth_quantile               +0.5768   +0.5730   +0.594   +0.516   +0.561   +0.525   -0.098   +0.026   4400
+   2  axis_eth_synthaug               +0.5742   +0.5709   +0.592   +0.516   +0.556   +0.525   -0.094   +0.022   4400
+   3  axis_eth                        +0.5740   +0.5664   +0.589   +0.512   +0.568   +0.526   -0.091   +0.026   4400
+   4  axis_eth_gen                    +0.5564   +0.5525   +0.593   +0.512   +0.602   +0.506   -0.007   +0.070   4400
+   5  axis_eth_kmeans                 +0.4786   +0.4919   +0.553   +0.386   +0.337   +0.304   -0.100   +0.082   4400
+   6  axis_quantile_canons_sym        +0.4301   +0.4324   +0.450   +0.402   +0.457   +0.346   +0.038   +0.030   4400
+   7  canons                          +0.3503   +0.3457   +0.387   +0.423   +0.099   +0.042   -0.019   +0.121   4400
+   8  rmse_eth                        +0.2957   +0.2838   +0.245   +0.380   +0.252   +0.201   +0.027   -0.020   4400
+   9  symmetry                        -0.1603   -0.1624   -0.181   -0.125   +0.032   -0.122   +0.149   -0.042   4400
+==============================================================================================================
+
+
+✓ Benchmark dump saved to /content/drive/MyDrive/Colab Notebooks/FaceRankNet4/cache/pseudo_label_benchmark.pkl
+Next step: pick the leaderboard winner, then run Cell 5c / 5d.
