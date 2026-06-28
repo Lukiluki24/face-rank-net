@@ -1,16 +1,13 @@
 """
 loss.py — FaceRankNet
 ======================
-Three loss components for FaceRankNet training.
+The three loss components used by training.
 
 Functions
 ---------
 l_reg(global_pred, global_gt)          — MSE regression loss
 l_rank(scores_A, scores_B, organ_mask) — Pairwise ranking loss (per organ)
-l_div(local_scores)                    — Diversity regularisation (-Var + boundary)
-
-Combined in train.py as:
-    total_loss = l_reg + LRANK_WEIGHT * l_rank + LDIV_WEIGHT * l_div
+l_div(local_scores)                    — Diversity regularisation
 """
 
 from __future__ import annotations
@@ -51,24 +48,16 @@ def l_rank(
     penalise if the model's local score for A is not greater than B:
 
         L_rank = Σ_organ  log(1 + exp(score_B[organ] - score_A[organ]))
-
-    Parameters
-    ----------
-    scores_A, scores_B : dict[str, Tensor] — shape (B,) per organ.
-    organ_mask         : Tensor, shape (B, 5) — bool.
-
-    Returns
-    -------
-    Tensor — scalar ranking loss.
     """
     total = torch.tensor(0.0, device=organ_mask.device)
     count = 0
 
     for o_idx, organ in enumerate(ORGAN_ORDER):
-        s_a = scores_A[organ]
-        s_b = scores_B[organ]
-        mask = organ_mask[:, o_idx].float()
-        pair_loss = torch.log1p(torch.exp(s_b - s_a))
+        s_a = scores_A[organ]                   # (B,)
+        s_b = scores_B[organ]                   # (B,)
+        mask = organ_mask[:, o_idx].float()     # (B,)
+
+        pair_loss = torch.log1p(torch.exp(s_b - s_a))  # (B,)
         total = total + (mask * pair_loss).sum()
         count += mask.sum()
 
@@ -83,17 +72,11 @@ def l_rank(
 
 def l_div(local_scores: dict[str, torch.Tensor]) -> torch.Tensor:
     """
-    Diversity regularisation: within-organ variance across the batch + boundary penalty.
+    Diversity regularisation: within-organ variance across the batch
+    plus a boundary penalty that keeps scores away from sigmoid saturation.
 
-    1. L_within = -mean_organs( Var_batch(score_organ) )
-       Encourages each organ to discriminate between faces.
-
-    2. L_boundary = mean( relu(1.2 - s) + relu(s - 4.8) )
-       Penalises scores that saturate near the (1, 5) boundary.
-
-    Returns
-    -------
-    Tensor — scalar (minimising = more diverse, less saturated).
+    L_within   = -mean_over_organs( Var_over_batch(score_organ) )
+    L_boundary =  mean_over_organs( mean_over_batch( relu(1.2 - s) + relu(s - 4.8) ) )
     """
     stacked = torch.stack(
         [local_scores[o] for o in ORGAN_ORDER], dim=-1

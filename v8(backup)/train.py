@@ -1,18 +1,14 @@
 """
 train.py — FaceRankNet
 =======================
-Full training loop with fixed-weight loss combination:
-    total_loss = l_reg + LRANK_WEIGHT * l_rank + LDIV_WEIGHT * l_div
-
-Features:
-  - Adam optimiser (lr and weight_decay from config)
-  - ReduceLROnPlateau scheduler (patience=3, mode=max on val PCC)
-  - Stratified train/val split carved from train_csv (config.TRAIN_VAL_SPLIT=0.9)
-  - Checkpoint saved on best VAL PCC (not test — no leakage)
-  - Test set evaluated exactly once after training on the best checkpoint
-  - Per-epoch metrics logged to results.csv
-  - Training curves saved to training_curves.png (loss, val PCC, val MAE)
-  - tqdm progress bars for epochs and batches
+Clean training loop:
+  - Adam optimiser
+  - Fixed loss weights:  L_reg + LRANK_WEIGHT * L_rank + LDIV_WEIGHT * L_div
+  - Stratified train/val split (config.TRAIN_VAL_SPLIT)
+  - Checkpoint saved on best VAL PCC
+  - Test set evaluated exactly once after training
+  - Per-epoch metrics → results.csv
+  - Training curves → training_curves.png
 
 Usage (from Colab Cell 8):
     run_training(
@@ -117,7 +113,7 @@ def _save_training_curves(
     best_epoch: int,
     save_path: str,
 ) -> None:
-    """Save a 1x3 training-curve figure (loss, val PCC, val MAE) to save_path."""
+    """Save a training-curve figure: loss | val PCC | val MAE."""
     if not history:
         return
 
@@ -131,14 +127,12 @@ def _save_training_curves(
     fig, axes = plt.subplots(1, 3, figsize=(15, 4))
     fig.suptitle("FaceRankNet — Training Curves", fontsize=14)
 
-    # Panel 1: Training loss
     ax = axes[0]
     ax.plot(epochs, losses, "b-", lw=1.5, label="Train loss")
     ax.set_xlabel("Epoch"); ax.set_ylabel("Loss")
     ax.set_title("Training Loss")
     ax.grid(True, alpha=0.3); ax.legend()
 
-    # Panel 2: Val PCC (checkpoint selection signal)
     ax = axes[1]
     ax.plot(epochs, val_pccs, "g-", lw=1.5, label="Val PCC")
     if best_epoch in epochs:
@@ -150,10 +144,9 @@ def _save_training_curves(
             label=f'Test PCC={test_metrics["pcc"]:.4f}',
         )
     ax.set_xlabel("Epoch"); ax.set_ylabel("PCC")
-    ax.set_title("Validation PCC  (checkpoint selection)")
+    ax.set_title("Validation PCC")
     ax.set_ylim(0, 1); ax.grid(True, alpha=0.3); ax.legend(fontsize=8)
 
-    # Panel 3: Val MAE
     ax = axes[2]
     ax.plot(epochs, val_maes, "r-", lw=1.5, label="Val MAE")
     ax.axhline(0.36, color="gray", ls=":", lw=1, label="Target 0.36")
@@ -192,23 +185,12 @@ def train(
     on_new_best: "callable | None" = None,
 ) -> FaceRankNet:
     """
-    Full training procedure.
+    Full training procedure with fixed loss weights.
 
-    Parameters
-    ----------
-    train_csv             : Path to training CSV (Filename, Rating[, Ethnicity]).
-                            A stratified val split (config.TRAIN_VAL_SPLIT) is
-                            carved from this CSV inside this function.
-    test_csv              : Path to test CSV. Evaluated EXACTLY ONCE after
-                            training on the best-val-PCC checkpoint.
-    landmark_cache_train  : Path to train landmark .pkl cache.
-    landmark_cache_test   : Path to test landmark .pkl cache.
-    pseudo_labels_path    : Path to pseudo-labels .pkl.
-    avg_face_path         : Path to avg_face .npy (required for 6-dim node features).
-    num_epochs, batch_size, lr, weight_decay : hyper-parameters.
-    checkpoint_path       : Where to save best model (selected on val PCC).
-    resume                : If True, resume from checkpoint_path when it exists.
-    on_new_best           : Optional callback fired when val PCC improves.
+    Total loss per batch:
+        L = L_reg + LRANK_WEIGHT * L_rank + LDIV_WEIGHT * L_div
+
+    Both faces in each pair contribute to L_reg.
 
     Returns
     -------
@@ -225,7 +207,7 @@ def train(
     pseudo_labels = load_pseudo_labels(pseudo_labels_path)
     avg_face = load_avg_face(avg_face_path)
 
-    # ---- Carve val split from train_csv (stratified by rating bucket) ----
+    # ---- Carve val split from train_csv ----
     full_train_df = pd.read_csv(train_csv)
     train_df, val_df = _stratified_val_split(
         full_train_df,
@@ -237,7 +219,7 @@ def train(
         len(train_df), len(val_df), config.TRAIN_VAL_SPLIT,
     )
 
-    # ---- Pseudo-label quality diagnostic (train portion only) ----
+    # ---- Pseudo-label quality diagnostic ----
     holistic_ratings = dict(zip(
         train_df[config.COL_FILENAME].tolist(),
         train_df[config.COL_RATING].astype(float).tolist(),
@@ -249,9 +231,7 @@ def train(
         train_df, coords_train, pseudo_labels, avg_face=avg_face,
         augment_jitter=config.AUGMENT_JITTER,
     )
-    val_face_ds = FaceDataset(
-        val_df, coords_train, avg_face=avg_face,
-    )
+    val_face_ds  = FaceDataset(val_df,  coords_train, avg_face=avg_face)
     test_face_ds = FaceDataset(test_csv, coords_test, avg_face=avg_face)
 
     pair_ds = PairDataset(
@@ -274,7 +254,6 @@ def train(
 
     # ---- Optimiser ----
     optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
-
 
     # ---- Checkpoint: resume or start fresh ----
     best_pcc: float  = -1.0
@@ -319,20 +298,18 @@ def train(
                 checkpoint_path,
             )
 
-    # ---- Graceful stop: create a file named "STOP" to halt after current epoch ----
+    # ---- Graceful stop flag ----
     stop_flag = Path(checkpoint_path).parent / "STOP"
 
-    # ---- Per-epoch history (for training curves + results.csv) ----
     history: list[dict] = []
 
-    # ---- Epoch loop ----
     for epoch in range(start_epoch, num_epochs + 1):
         if stop_flag.exists():
             logger.info("STOP file detected — halting training after epoch %d.", epoch - 1)
             stop_flag.unlink()
             break
 
-        # Resample pairs every epoch so the model sees different (A, B) combinations.
+        # Resample pairs every epoch so the model sees different (A, B) combos.
         pair_ds._pairs = pair_ds._build_pairs()
         if config.USE_WEIGHTED_PAIR_SAMPLER:
             pair_loader = make_weighted_pair_loader(
@@ -358,7 +335,6 @@ def train(
 
             optimizer.zero_grad()
 
-            # ---- Forward pass ----
             out_a = model(sg_a)
             out_b = model(sg_b)
 
@@ -367,15 +343,20 @@ def train(
             local_a = out_a["local_scores"]
             local_b = out_b["local_scores"]
 
-            # ---- Three losses, fixed weights ----
-            loss_reg  = (l_reg(global_pred_a, ratings_a) + l_reg(global_pred_b, ratings_b)) / 2
+            loss_reg = (
+                l_reg(global_pred_a, ratings_a)
+                + l_reg(global_pred_b, ratings_b)
+            ) / 2
             loss_rank = l_rank(local_a, local_b, organ_mask)
             loss_div  = l_div(local_a)
 
-            total_loss = loss_reg + config.LRANK_WEIGHT * loss_rank + config.LDIV_WEIGHT * loss_div
-
-            # ---- Backward + step ----
+            total_loss = (
+                loss_reg
+                + config.LRANK_WEIGHT * loss_rank
+                + config.LDIV_WEIGHT * loss_div
+            )
             total_loss.backward()
+
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
             optimizer.step()
 
@@ -387,7 +368,7 @@ def train(
 
         avg_loss = total_loss_accum / max(n_batches, 1)
 
-        # ---- Validation on val set (no test leakage) ----
+        # ---- Validation on val set ----
         val_metrics = run_full_evaluation(model, val_loader, device)
         val_pcc = val_metrics["pcc"]
         val_mae = val_metrics["mae"]
@@ -491,10 +472,6 @@ def train(
     return model
 
 
-# Alias used in Colab Cell 8
-run_training = train
-
-
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -513,9 +490,11 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint", default=str(config.CHECKPOINT_PATH))
     parser.add_argument(
         "--resume", action="store_true", default=config.RESUME_FROM_CHECKPOINT,
+        help="Resume training from --checkpoint if it exists.",
     )
     parser.add_argument(
         "--no-resume", dest="resume", action="store_false",
+        help="Always start from scratch, ignoring any existing checkpoint.",
     )
     args = parser.parse_args()
 

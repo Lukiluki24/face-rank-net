@@ -9,10 +9,6 @@ compute_pcc(preds, gts)                          — Pearson r
 compute_mae(preds, gts)                          — Mean Absolute Error
 compute_dpd(preds, gts, ethnicity_labels)        — Demographic Parity Difference
 validate_local_scores(model, dataset, device)    — Spearman ρ check for all organs
-compute_fusion_sensitivity(model, loader, device) — Gradient-based sensitivity diagnostic
-print_fusion_sensitivity(report)                 — Pretty-print sensitivity report
-inspect_fusion_weights(model)                    — Softmax fusion weights per organ
-evaluate_organ_contributions(model, loader, dev) — Per-organ stats table
 run_full_evaluation(model, loader, device)       — Convenience wrapper
 """
 
@@ -213,7 +209,10 @@ def compute_fusion_sensitivity(
         Σ_embed = mean_batch ||∂g/∂global_embed||_1
                 = mean_batch_dim × embed_dim           (256 dims)
 
-    If Σ_local / Σ_embed << 1 the head is effectively ignoring local_scores.
+    If Σ_local / Σ_embed << 1 the head is effectively ignoring local_scores
+    — the architecture wires them in but training decided they were noise.
+    Per-dim ratios in the table are diagnostic (each organ vs each embed
+    component), not a verdict.
 
     Returns
     -------
@@ -221,11 +220,14 @@ def compute_fusion_sensitivity(
         per_organ                : {organ: mean |∂g/∂local_i|}
         global_embed_per_dim     : mean |∂g/∂global_embed[k]| over embed dims
         global_embed_l1_per_face : mean ||∂g/∂global_embed||_1 per face
+                                    (= per_dim × embed_dim)
         embed_dim                : number of embed dimensions
-        ratio_local_to_embed_pd  : per-dim ratio (diagnostic only)
+        ratio_local_to_embed_pd  : per_organ[o] / global_embed_per_dim
+                                    (per-dim ratio — diagnostic only)
         sigma_local              : Σ over 5 organs of per_organ[o]
         sigma_embed              : same as global_embed_l1_per_face
-        ratio_sigma              : sigma_local / sigma_embed (verdict)
+        ratio_sigma              : sigma_local / sigma_embed
+                                    (THIS is the verdict ratio)
         fusion_mode              : the architecture's setting
         n_batches                : how many batches we averaged
     """
@@ -245,6 +247,8 @@ def compute_fusion_sensitivity(
             local_scores = out["local_scores"]
             global_embed = out.get("global_embed")
 
+            # Samples are independent in the forward pass, so summing
+            # global_score recovers per-sample gradients via autograd.
             for organ in ORGAN_ORDER:
                 ls = local_scores[organ]
                 grads = torch.autograd.grad(
@@ -252,9 +256,14 @@ def compute_fusion_sensitivity(
                     retain_graph=True, create_graph=False, allow_unused=True,
                 )[0]
                 if grads is None:
-                    sens_local[organ].extend([0.0] * global_score.shape[0])
+                    # No forward dependency (e.g. baseline mode)
+                    sens_local[organ].extend(
+                        [0.0] * global_score.shape[0]
+                    )
                 else:
-                    sens_local[organ].extend(grads.abs().detach().cpu().tolist())
+                    sens_local[organ].extend(
+                        grads.abs().detach().cpu().tolist()
+                    )
 
             if global_embed is not None and global_embed.requires_grad:
                 grads = torch.autograd.grad(
@@ -275,11 +284,13 @@ def compute_fusion_sensitivity(
     embed_dim = config.GAT_HIDDEN_DIM * config.GAT_NUM_HEADS
     embed_l1_per_face = embed_per_dim * embed_dim
 
+    # Per-dim ratio (each organ scalar vs each embed scalar) — diagnostic only.
     if embed_per_dim > 1e-12:
         ratio_pd = {o: v / embed_per_dim for o, v in per_organ_mean.items()}
     else:
         ratio_pd = {o: float("inf") if v > 0 else 0.0 for o, v in per_organ_mean.items()}
 
+    # Aggregate L1-norm ratio — the verdict.
     sigma_local = float(sum(per_organ_mean.values()))
     sigma_embed = embed_l1_per_face
     if sigma_embed > 1e-12:
@@ -333,108 +344,19 @@ def print_fusion_sensitivity(report: dict) -> None:
     if mode == "score_aware":
         if ratio_sigma < 0.05:
             print(f"  ✗ FAIL — Σ_local is < 5% of Σ_embed.")
-            print(f"    local_scores carry negligible aggregate influence on global_score.")
+            print(f"    local_scores carry negligible aggregate influence on")
+            print(f"    global_score; the score-aware head is dominated by")
+            print(f"    global_embed. The concat is wired up but ignored.")
         elif ratio_sigma < 0.20:
             print(f"  ~ MARGINAL — Σ_local is {ratio_sigma*100:.1f}% of Σ_embed.")
+            print(f"    Present but not a dominant signal in the global head.")
         else:
             print(f"  ✓ PASS — Σ_local / Σ_embed = {ratio_sigma:.2f}.")
+            print(f"    local_scores carry substantial aggregate influence.")
     elif mode == "fusion_weight":
         print("  (fusion_weight mode: ratios equal softmax(fusion_weights);")
         print("   Σ_embed = 0 because global_embed is not in the forward path.)")
     print()
-
-
-# ---------------------------------------------------------------------------
-# Fusion weight inspection
-# ---------------------------------------------------------------------------
-
-def inspect_fusion_weights(model: FaceRankNet) -> dict[str, float]:
-    """
-    Extract per-organ fusion weights (softmax of learnable parameters).
-
-    Parameters
-    ----------
-    model : FaceRankNet — may be in train or eval mode.
-
-    Returns
-    -------
-    dict[organ_name → weight], ordered by descending weight.
-    """
-    with torch.no_grad():
-        weights = torch.softmax(model.fusion_weights, dim=0).cpu().numpy()
-
-    result = {organ: float(w) for organ, w in zip(ORGAN_ORDER, weights)}
-    ranked = sorted(result.items(), key=lambda x: x[1], reverse=True)
-
-    logger.info("--- Per-organ fusion weights (softmax) ---")
-    for rank, (organ, w) in enumerate(ranked, 1):
-        bar = "#" * int(w * 40)
-        logger.info("  %d. %-14s  %.4f  %s", rank, organ, w, bar)
-
-    return dict(ranked)
-
-
-@torch.no_grad()
-def evaluate_organ_contributions(
-    model: FaceRankNet,
-    loader: DataLoader,
-    device: torch.device,
-) -> dict[str, dict[str, float]]:
-    """
-    Per-organ statistics: fusion weight, mean/std local score, and weighted
-    contribution to the global score.
-
-    Parameters
-    ----------
-    model  : FaceRankNet in eval mode.
-    loader : DataLoader yielding collated face batches.
-    device : torch device.
-
-    Returns
-    -------
-    dict[organ_name → dict] where inner dict has keys:
-        'fusion_weight'       — softmax weight (fixed across samples)
-        'mean_local_score'    — mean predicted local score over the dataset
-        'std_local_score'     — std of predicted local score
-        'weighted_contrib'    — fusion_weight × mean_local_score
-    """
-    model.eval()
-
-    all_local: dict[str, list[float]] = {o: [] for o in ORGAN_ORDER}
-
-    for batch in loader:
-        subgraphs = {k: v.to(device) for k, v in batch["subgraphs"].items()}
-        out = model(subgraphs)
-        for organ in ORGAN_ORDER:
-            scores = out["local_scores"][organ].cpu().numpy().tolist()
-            all_local[organ].extend(scores)
-
-    with torch.no_grad():
-        weights = torch.softmax(model.fusion_weights, dim=0).cpu().numpy()
-
-    results: dict[str, dict[str, float]] = {}
-    logger.info("--- Per-organ contribution analysis ---")
-    logger.info(
-        "  %-14s  %7s  %10s  %9s  %12s",
-        "Organ", "Weight", "Mean Score", "Std Score", "Contrib",
-    )
-    for organ, w in zip(ORGAN_ORDER, weights):
-        arr = np.array(all_local[organ], dtype=np.float32)
-        mean_s = float(arr.mean())
-        std_s = float(arr.std())
-        contrib = float(w) * mean_s
-        results[organ] = {
-            "fusion_weight": float(w),
-            "mean_local_score": mean_s,
-            "std_local_score": std_s,
-            "weighted_contrib": contrib,
-        }
-        logger.info(
-            "  %-14s  %7.4f  %10.4f  %9.4f  %12.4f",
-            organ, float(w), mean_s, std_s, contrib,
-        )
-
-    return results
 
 
 # ---------------------------------------------------------------------------

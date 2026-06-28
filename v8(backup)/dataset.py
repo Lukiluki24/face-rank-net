@@ -12,8 +12,7 @@ FaceDataset
 
 PairDataset
     Wraps FaceDataset to yield (face_A, face_B, organ_mask) triplets for
-    the pairwise ranking loss.  For each anchor face A, samples one face B
-    per organ where pseudo_score_A[organ] > pseudo_score_B[organ].
+    the pairwise ranking loss.
 
 Reproducibility: np.random.seed(42) set at module level.
 """
@@ -29,7 +28,6 @@ import torch
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
 import config
-from organ_indices import ORGAN_INDICES
 from preprocessing import build_all_subgraphs
 
 np.random.seed(config.SEED)
@@ -37,6 +35,19 @@ random.seed(config.SEED)
 torch.manual_seed(config.SEED)
 
 ORGAN_ORDER: list[str] = config.ORGAN_NAMES
+
+
+# ---------------------------------------------------------------------------
+# Bucket helper
+# ---------------------------------------------------------------------------
+
+def _bucket_of(rating: float, edges: tuple[float, ...] = config.BUCKET_EDGES) -> int:
+    """Map a rating to a discrete bucket index (0..len(edges))."""
+    b = 0
+    for e in edges:
+        if rating >= e:
+            b += 1
+    return b
 
 
 # ---------------------------------------------------------------------------
@@ -51,17 +62,16 @@ class FaceDataset(Dataset):
     ----------
     csv_path : str | pd.DataFrame
         Path to a CSV file with columns: Filename, Rating[, Ethnicity],
-        or a DataFrame directly.
+        or a DataFrame with the same columns.
     coords_cache : dict[str, np.ndarray]
         Maps filename → (468, 3) normalised landmark array.
     pseudo_labels : dict[str, dict[str, float]] | None
         Maps filename → {organ: pseudo_score ∈ [1,5]}.
         Only required for training (pair sampling); pass None for test.
     avg_face : np.ndarray | None
-        (468, 3) universal average face. When provided, node features are
-        6-dim (x, y, z, Δx, Δy, Δz); when None, 3-dim (x, y, z).
+        (468, 3) reference face — required for 6-dim node features.
     augment_jitter : bool
-        Add small Gaussian noise to landmark coords each __getitem__ call.
+        Add tiny Gaussian noise to coords on every __getitem__.
     """
 
     def __init__(
@@ -78,7 +88,6 @@ class FaceDataset(Dataset):
         else:
             df = pd.read_csv(csv_path)
 
-        # Keep only rows with available landmarks
         mask = df[config.COL_FILENAME].isin(coords_cache)
         dropped = (~mask).sum()
         if dropped:
@@ -107,7 +116,13 @@ class FaceDataset(Dataset):
 
     def __getitem__(self, idx: int) -> dict:
         fname = self.filenames[idx]
-        coords = self.coords_cache[fname].copy()     # (468, 3)
+        coords = self.coords_cache[fname]
+        rating_val = float(self.ratings[idx])
+
+        pseudo = self.pseudo_labels.get(fname, {})
+        pseudo_arr = np.array(
+            [pseudo.get(o, 3.0) for o in ORGAN_ORDER], dtype=np.float32
+        )
 
         if self.augment_jitter and self.jitter_std > 0:
             coords = coords + np.random.normal(
@@ -116,15 +131,10 @@ class FaceDataset(Dataset):
 
         subgraphs = build_all_subgraphs(coords, self.avg_face)
 
-        pseudo = self.pseudo_labels.get(fname, {})
-        pseudo_arr = np.array(
-            [pseudo.get(o, 3.0) for o in ORGAN_ORDER], dtype=np.float32
-        )
-
         return {
             "filename": fname,
             "subgraphs": subgraphs,
-            "rating": torch.tensor(float(self.ratings[idx]), dtype=torch.float32),
+            "rating": torch.tensor(rating_val, dtype=torch.float32),
             "pseudo_scores": torch.from_numpy(pseudo_arr),
             "ethnicity": self.ethnicities[idx],
         }
@@ -138,9 +148,11 @@ class PairDataset(Dataset):
     """
     Wraps FaceDataset and yields triplets for the pairwise ranking loss.
 
-    Each item is (sample_A, sample_B, organ_mask) where organ_mask is a
-    boolean tensor of shape (5,) that is True for organs where
-    pseudo_score_A > pseudo_score_B.
+    Each item is:
+        (sample_A, sample_B, organ_mask)
+
+    where ``organ_mask`` is a boolean tensor of shape (5,) that is True
+    for organs where pseudo_score_A - pseudo_score_B > RANK_PSEUDO_MARGIN.
     """
 
     def __init__(
@@ -153,7 +165,7 @@ class PairDataset(Dataset):
         self.pairs_per_sample = pairs_per_sample
         self.hard_pair_sampling = hard_pair_sampling
 
-        # Precompute bucket→indices map for Hard Pair Sampling
+        # Precompute bucket→indices map once for Hard Pair Sampling
         self._bucket_indices: dict[int, list[int]] = {}
         for i, r in enumerate(self.ds.ratings):
             b = _bucket_of(r, config.BUCKET_EDGES)
@@ -161,12 +173,17 @@ class PairDataset(Dataset):
 
         self._pairs: list[tuple[int, int]] = self._build_pairs()
 
-    def _sample_candidates(self, a_idx: int, n: int, k: int) -> list[int]:
+    def _sample_candidates(
+        self,
+        a_idx: int,
+        n: int,
+        k: int,
+    ) -> list[int]:
         """
         Choose candidate partner indices for anchor a_idx.
 
-        With Hard Pair Sampling, samples more heavily from rating buckets
-        far from the anchor's bucket.
+        With Hard Pair Sampling enabled, sample more heavily from rating
+        buckets that are FAR from the anchor's bucket.
         """
         if not self.hard_pair_sampling:
             return random.sample(
@@ -175,6 +192,7 @@ class PairDataset(Dataset):
             )
 
         b_a = _bucket_of(self.ds.ratings[a_idx], config.BUCKET_EDGES)
+
         candidates: list[int] = []
         for b, members in self._bucket_indices.items():
             if not members:
@@ -185,7 +203,8 @@ class PairDataset(Dataset):
             pool = [i for i in members if i != a_idx]
             if not pool:
                 continue
-            candidates.extend(random.sample(pool, k=min(quota, len(pool))))
+            quota = min(quota, len(pool))
+            candidates.extend(random.sample(pool, k=quota))
 
         if len(candidates) > k:
             random.shuffle(candidates)
@@ -201,12 +220,16 @@ class PairDataset(Dataset):
             if not pseudo_a:
                 continue
 
-            candidates = self._sample_candidates(a_idx, n=n, k=self.pairs_per_sample * 10)
+            candidates = self._sample_candidates(
+                a_idx, n=n, k=self.pairs_per_sample * 10
+            )
 
             rating_a = self.ds.ratings[a_idx]
             added = 0
             for b_idx in candidates:
-                pseudo_b = self.ds.pseudo_labels.get(self.ds.filenames[b_idx], {})
+                pseudo_b = self.ds.pseudo_labels.get(
+                    self.ds.filenames[b_idx], {}
+                )
                 if not pseudo_b:
                     continue
 
@@ -247,15 +270,14 @@ class PairDataset(Dataset):
 
 def collate_faces(batch: list[dict]) -> dict:
     """Collate a list of FaceDataset items into a batched dict."""
-    organs = ORGAN_ORDER
     batched_subgraphs: dict[str, dgl.DGLGraph] = {
         o: dgl.batch([item["subgraphs"][o] for item in batch])
-        for o in organs
+        for o in ORGAN_ORDER
     }
     return {
-        "filenames":   [item["filename"] for item in batch],
-        "subgraphs":   batched_subgraphs,
-        "ratings":     torch.stack([item["rating"] for item in batch]),
+        "filenames": [item["filename"] for item in batch],
+        "subgraphs": batched_subgraphs,
+        "ratings": torch.stack([item["rating"] for item in batch]),
         "pseudo_scores": torch.stack([item["pseudo_scores"] for item in batch]),
         "ethnicities": [item["ethnicity"] for item in batch],
     }
@@ -267,25 +289,12 @@ def collate_pairs(
     """Collate a list of PairDataset items."""
     batch_a = [item[0] for item in batch]
     batch_b = [item[1] for item in batch]
-    masks = torch.stack([item[2] for item in batch])    # (B, 5)
+    masks = torch.stack([item[2] for item in batch])
     return collate_faces(batch_a), collate_faces(batch_b), masks
 
 
 # ---------------------------------------------------------------------------
-# Bucket helper
-# ---------------------------------------------------------------------------
-
-def _bucket_of(rating: float, edges: tuple[float, ...] = (2.0, 3.0, 4.0)) -> int:
-    """Map a rating to a discrete bucket index (0..len(edges))."""
-    b = 0
-    for e in edges:
-        if rating >= e:
-            b += 1
-    return b
-
-
-# ---------------------------------------------------------------------------
-# DataLoader factories
+# DataLoader factory
 # ---------------------------------------------------------------------------
 
 def make_face_loader(
@@ -322,13 +331,16 @@ def make_weighted_pair_loader(
     pair_dataset: PairDataset,
     batch_size: int = config.BATCH_SIZE,
     bucket_edges: tuple[float, ...] = config.BUCKET_EDGES,
-    smoothing: str = config.PAIR_SAMPLER_SMOOTHING,
+    smoothing: str = "sqrt",
 ) -> DataLoader:
     """
     Pair loader with WeightedRandomSampler that rebalances anchor (face A)
-    rating buckets using config.BUCKET_EDGES.
+    rating buckets.
 
-    smoothing: "sqrt" (moderate boost) or "inverse" (aggressive boost).
+    Smoothing modes
+    ---------------
+    "inverse" — weight ∝ 1 / count   (strong rebalance; ~13× boost on Jelek)
+    "sqrt"    — weight ∝ 1 / √count  (moderate rebalance; ~3.6× boost on Jelek)
     """
     ratings = pair_dataset.ds.ratings
     pair_buckets = np.array(

@@ -66,9 +66,12 @@ CROSS_ORGAN_HEADS: int = 4
 # Fusion mode — how the 5 organ-level outputs combine into global_score
 # ---------------------------------------------------------------------------
 #   "score_aware"  : global_score = global_mlp( concat(global_embed, local_scores) )
-#                    Use compute_fusion_sensitivity() in evaluate.py to verify.
+#                    local_scores are concatenated into the global head's input.
+#                    Use compute_fusion_sensitivity() in evaluate.py to verify
+#                    the head actually uses them.
 #
 #   "fusion_weight": global_score = Σ softmax(fusion_weights)[i] * local_scores[i]
+#                    Drops cross-organ attention + global_mlp entirely.
 #                    Pure interpretable weighted sum of local scores.
 FUSION_MODE: str = "fusion_weight"
 
